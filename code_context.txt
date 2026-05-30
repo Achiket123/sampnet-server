@@ -1,6 +1,6 @@
 # Code Context
-# Generated: 2026-05-29T12:23:47+05:30
-# Files: 99
+# Generated: 2026-05-30T19:43:55+05:30
+# Files: 203
 #
 # To extract all files back to disk, run:
 #   awk '/^BEGIN_FILE:/{f=substr($0,11); sub(/^:/, "", f); next} /^END_FILE:/{f=""; next} f{print > f}' code_context.txt
@@ -2666,7 +2666,7 @@ func (r *GormRepository) IncrementMessageCount(ctx context.Context, id uint) err
 	return r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", id).UpdateColumn("number_of_message", gorm.Expr("number_of_message + 1")).Error
 }
 END_FILE:internal/adapters/repository/chats/gorm_repository.go
-# path: internal/platform/database/init.go | lang: go | tokens: 470 | size: 1883
+# path: internal/platform/database/init.go | lang: go | tokens: 474 | size: 1899
 # functions: Init, initDB, PerformMigrations
 BEGIN_FILE:internal/platform/database/init.go
 package database
@@ -2699,7 +2699,7 @@ func initDB() *gorm.DB {
 		log.Fatalf("Database configuration missing. Please check environment variables.")
 	}
 
-	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s", host, user, password, dbname, port)
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable", host, user, password, dbname, port)
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Info),
@@ -4588,20 +4588,6 @@ type Message struct {
 	TimeStamp  time.Time `json:"time_stamp"`
 }
 END_FILE:internal/domain/messages/entity.go
-# path: internal/domain/chats/repository.go | lang: go | tokens: 82 | size: 330
-# imports: context
-BEGIN_FILE:internal/domain/chats/repository.go
-package chats
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, chat *Chat) error
-	ListByOrganisation(ctx context.Context, organisationID uint) ([]Chat, error)
-	UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error
-	IncrementMessageCount(ctx context.Context, id uint) error
-}
-END_FILE:internal/domain/chats/repository.go
 # path: internal/domain/organisation/usecase.go | lang: go | tokens: 82 | size: 329
 # imports: context
 BEGIN_FILE:internal/domain/organisation/usecase.go
@@ -4616,6 +4602,20 @@ type UseCase interface {
 	Update(ctx context.Context, org *Entity) error
 }
 END_FILE:internal/domain/organisation/usecase.go
+# path: internal/domain/chats/repository.go | lang: go | tokens: 82 | size: 330
+# imports: context
+BEGIN_FILE:internal/domain/chats/repository.go
+package chats
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, chat *Chat) error
+	ListByOrganisation(ctx context.Context, organisationID uint) ([]Chat, error)
+	UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error
+	IncrementMessageCount(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/chats/repository.go
 # path: internal/domain/callstate/repository.go | lang: go | tokens: 79 | size: 319
 # imports: context
 BEGIN_FILE:internal/domain/callstate/repository.go
@@ -4788,18 +4788,6 @@ type UseCase interface {
 	GetChats(ctx context.Context, organisationID uint) ([]Chat, error)
 }
 END_FILE:internal/domain/chats/usecase.go
-# path: internal/domain/files/repository.go | lang: go | tokens: 41 | size: 164
-# imports: context
-BEGIN_FILE:internal/domain/files/repository.go
-package files
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, file *File) error
-	GetByID(ctx context.Context, id uint) (*File, error)
-}
-END_FILE:internal/domain/files/repository.go
 # path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
 # imports: context
 BEGIN_FILE:internal/domain/files/usecase.go
@@ -4825,6 +4813,18 @@ type UseCase interface {
 	HandleRoom(ctx context.Context, roomID string, ws *websocket.Conn)
 }
 END_FILE:internal/domain/calls/usecase.go
+# path: internal/domain/files/repository.go | lang: go | tokens: 41 | size: 164
+# imports: context
+BEGIN_FILE:internal/domain/files/repository.go
+package files
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, file *File) error
+	GetByID(ctx context.Context, id uint) (*File, error)
+}
+END_FILE:internal/domain/files/repository.go
 # path: internal/adapters/http/calls/routes.go | lang: go | tokens: 36 | size: 147
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/calls/routes.go
@@ -4838,4 +4838,420 @@ func RegisterRoutes(r *gin.Engine, h *Handler) {
 	r.GET("/api/v1/call/:id", h.HandleRoom)
 }
 END_FILE:internal/adapters/http/calls/routes.go
-# included: 99 / 99 | total tokens: 34176
+# path: internal/domain/task_attachments/repository.go | lang: go | tokens: 6 | size: 24
+BEGIN_FILE:internal/domain/task_attachments/repository.go
+package task_attachments
+END_FILE:internal/domain/task_attachments/repository.go
+# path: internal/adapters/repository/task_attachments/gorm_repository.go | lang: go | tokens: 6 | size: 24
+BEGIN_FILE:internal/adapters/repository/task_attachments/gorm_repository.go
+package task_attachments
+END_FILE:internal/adapters/repository/task_attachments/gorm_repository.go
+# path: internal/adapters/http/task_attachments/handler.go | lang: go | tokens: 6 | size: 25
+BEGIN_FILE:internal/adapters/http/task_attachments/handler.go
+package task_attachments
+END_FILE:internal/adapters/http/task_attachments/handler.go
+# path: internal/adapters/http/task_attachments/routes.go | lang: go | tokens: 6 | size: 25
+BEGIN_FILE:internal/adapters/http/task_attachments/routes.go
+package task_attachments
+END_FILE:internal/adapters/http/task_attachments/routes.go
+# path: internal/domain/task_attachments/entity.go | lang: go | tokens: 6 | size: 24
+BEGIN_FILE:internal/domain/task_attachments/entity.go
+package task_attachments
+END_FILE:internal/domain/task_attachments/entity.go
+# path: internal/domain/task_attachments/usecase.go | lang: go | tokens: 6 | size: 24
+BEGIN_FILE:internal/domain/task_attachments/usecase.go
+package task_attachments
+END_FILE:internal/domain/task_attachments/usecase.go
+# path: internal/usecase/task_attachments/usecase.go | lang: go | tokens: 6 | size: 24
+BEGIN_FILE:internal/usecase/task_attachments/usecase.go
+package task_attachments
+END_FILE:internal/usecase/task_attachments/usecase.go
+# path: internal/adapters/http/notifications/handler.go | lang: go | tokens: 5 | size: 22
+BEGIN_FILE:internal/adapters/http/notifications/handler.go
+package notifications
+END_FILE:internal/adapters/http/notifications/handler.go
+# path: internal/usecase/task_comments/usecase.go | lang: go | tokens: 5 | size: 22
+BEGIN_FILE:internal/usecase/task_comments/usecase.go
+package task_comments
+END_FILE:internal/usecase/task_comments/usecase.go
+# path: internal/adapters/http/notifications/routes.go | lang: go | tokens: 5 | size: 22
+BEGIN_FILE:internal/adapters/http/notifications/routes.go
+package notifications
+END_FILE:internal/adapters/http/notifications/routes.go
+# path: internal/adapters/repository/task_comments/gorm_repository.go | lang: go | tokens: 5 | size: 22
+BEGIN_FILE:internal/adapters/repository/task_comments/gorm_repository.go
+package task_comments
+END_FILE:internal/adapters/repository/task_comments/gorm_repository.go
+# path: internal/adapters/repository/notifications/gorm_repository.go | lang: go | tokens: 5 | size: 21
+BEGIN_FILE:internal/adapters/repository/notifications/gorm_repository.go
+package notifications
+END_FILE:internal/adapters/repository/notifications/gorm_repository.go
+# path: internal/domain/task_comments/entity.go | lang: go | tokens: 5 | size: 21
+BEGIN_FILE:internal/domain/task_comments/entity.go
+package task_comments
+END_FILE:internal/domain/task_comments/entity.go
+# path: internal/domain/task_comments/repository.go | lang: go | tokens: 5 | size: 21
+BEGIN_FILE:internal/domain/task_comments/repository.go
+package task_comments
+END_FILE:internal/domain/task_comments/repository.go
+# path: internal/adapters/http/task_comments/handler.go | lang: go | tokens: 5 | size: 21
+BEGIN_FILE:internal/adapters/http/task_comments/handler.go
+package task_comments
+END_FILE:internal/adapters/http/task_comments/handler.go
+# path: internal/domain/task_comments/usecase.go | lang: go | tokens: 5 | size: 22
+BEGIN_FILE:internal/domain/task_comments/usecase.go
+package task_comments
+END_FILE:internal/domain/task_comments/usecase.go
+# path: internal/adapters/http/task_comments/routes.go | lang: go | tokens: 5 | size: 22
+BEGIN_FILE:internal/adapters/http/task_comments/routes.go
+package task_comments
+END_FILE:internal/adapters/http/task_comments/routes.go
+# path: internal/platform/websocket/presence_tracker.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/platform/websocket/presence_tracker.go
+package websocket
+END_FILE:internal/platform/websocket/presence_tracker.go
+# path: internal/platform/websocket/client.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/platform/websocket/client.go
+package websocket
+END_FILE:internal/platform/websocket/client.go
+# path: internal/platform/websocket/hub.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/platform/websocket/hub.go
+package websocket
+END_FILE:internal/platform/websocket/hub.go
+# path: internal/platform/websocket/notification_broadcaster.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/platform/websocket/notification_broadcaster.go
+package websocket
+END_FILE:internal/platform/websocket/notification_broadcaster.go
+# path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/milestones/handler.go
+package milestone
+END_FILE:internal/adapters/http/milestones/handler.go
+# path: internal/usecase/analytics/usecase.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/usecase/analytics/usecase.go
+package analytics
+END_FILE:internal/usecase/analytics/usecase.go
+# path: internal/usecase/calendar/usecase.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/usecase/calendar/usecase.go
+package calendar
+END_FILE:internal/usecase/calendar/usecase.go
+# path: internal/adapters/repository/onboarding/gorm_repository.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/repository/onboarding/gorm_repository.go
+package oboarding
+END_FILE:internal/adapters/repository/onboarding/gorm_repository.go
+# path: internal/adapters/repository/settings/gorm_repository.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/adapters/repository/settings/gorm_repository.go
+package settings
+END_FILE:internal/adapters/repository/settings/gorm_repository.go
+# path: internal/adapters/http/calendar/routes.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/http/calendar/routes.go
+package calendar
+END_FILE:internal/adapters/http/calendar/routes.go
+# path: internal/adapters/http/settings/routes.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/http/settings/routes.go
+package settings
+END_FILE:internal/adapters/http/settings/routes.go
+# path: internal/adapters/repository/milestones/gorm_repository.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
+package milestones
+END_FILE:internal/adapters/repository/milestones/gorm_repository.go
+# path: internal/adapters/http/milestones/routes.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/milestones/routes.go
+package milestone
+END_FILE:internal/adapters/http/milestones/routes.go
+# path: internal/adapters/repository/calendar/gorm_repository.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/repository/calendar/gorm_repository.go
+package calendar
+END_FILE:internal/adapters/repository/calendar/gorm_repository.go
+# path: internal/adapters/http/calendar/handler.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/adapters/http/calendar/handler.go
+package calendar
+END_FILE:internal/adapters/http/calendar/handler.go
+# path: internal/domain/settings/entity.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/domain/settings/entity.go
+package settings
+END_FILE:internal/domain/settings/entity.go
+# path: internal/domain/settings/repository.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/domain/settings/repository.go
+package settings
+END_FILE:internal/domain/settings/repository.go
+# path: internal/domain/settings/usecase.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/domain/settings/usecase.go
+package settings
+END_FILE:internal/domain/settings/usecase.go
+# path: internal/usecase/milestones/usecase.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/usecase/milestones/usecase.go
+package milestones
+END_FILE:internal/usecase/milestones/usecase.go
+# path: internal/usecase/onboarding/usecase.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/usecase/onboarding/usecase.go
+package onboarding
+END_FILE:internal/usecase/onboarding/usecase.go
+# path: internal/adapters/http/settings/handler.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/http/settings/handler.go
+package settings
+END_FILE:internal/adapters/http/settings/handler.go
+# path: internal/domain/analytics/entity.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/domain/analytics/entity.go
+package analytics
+END_FILE:internal/domain/analytics/entity.go
+# path: internal/domain/analytics/repository.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/domain/analytics/repository.go
+package analytics
+END_FILE:internal/domain/analytics/repository.go
+# path: internal/domain/analytics/usecase.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/domain/analytics/usecase.go
+package analytics
+END_FILE:internal/domain/analytics/usecase.go
+# path: internal/usecase/settings/usecase.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/usecase/settings/usecase.go
+package settings
+END_FILE:internal/usecase/settings/usecase.go
+# path: internal/adapters/http/analytics/routes.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/http/analytics/routes.go
+package analytics
+END_FILE:internal/adapters/http/analytics/routes.go
+# path: internal/adapters/http/onboarding/routes.go | lang: go | tokens: 4 | size: 19
+BEGIN_FILE:internal/adapters/http/onboarding/routes.go
+package onboarding
+END_FILE:internal/adapters/http/onboarding/routes.go
+# path: internal/adapters/http/onboarding/handler.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/onboarding/handler.go
+package onboarding
+END_FILE:internal/adapters/http/onboarding/handler.go
+# path: internal/adapters/repository/analytics/gorm_repository.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/repository/analytics/gorm_repository.go
+package analytics
+END_FILE:internal/adapters/repository/analytics/gorm_repository.go
+# path: internal/adapters/http/analytics/handler.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/analytics/handler.go
+package analytics
+END_FILE:internal/adapters/http/analytics/handler.go
+# path: internal/domain/search/repository.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/search/repository.go
+package search
+END_FILE:internal/domain/search/repository.go
+# path: internal/domain/search/usecase.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/domain/search/usecase.go
+package search
+END_FILE:internal/domain/search/usecase.go
+# path: internal/platform/database/models/attendance_policy_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/attendance_policy_model.go
+package models
+END_FILE:internal/platform/database/models/attendance_policy_model.go
+# path: internal/platform/database/models/audit_log_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/audit_log_model.go
+package models
+END_FILE:internal/platform/database/models/audit_log_model.go
+# path: internal/domain/search/entity.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/search/entity.go
+package search
+END_FILE:internal/domain/search/entity.go
+# path: internal/adapters/http/people/handler.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/adapters/http/people/handler.go
+package people
+END_FILE:internal/adapters/http/people/handler.go
+# path: internal/platform/database/models/invite_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/invite_model.go
+package models
+END_FILE:internal/platform/database/models/invite_model.go
+# path: internal/platform/database/models/leave_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/leave_model.go
+package models
+END_FILE:internal/platform/database/models/leave_model.go
+# path: internal/platform/database/models/leave_policy_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/leave_policy_model.go
+package models
+END_FILE:internal/platform/database/models/leave_policy_model.go
+# path: internal/adapters/http/people/routes.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/adapters/http/people/routes.go
+package people
+END_FILE:internal/adapters/http/people/routes.go
+# path: internal/platform/database/models/milestone_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/milestone_model.go
+package models
+END_FILE:internal/platform/database/models/milestone_model.go
+# path: internal/domain/onboarding/usecase.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/domain/onboarding/usecase.go
+package entity
+END_FILE:internal/domain/onboarding/usecase.go
+# path: internal/platform/database/models/onboarding_progress_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/onboarding_progress_model.go
+package models
+END_FILE:internal/platform/database/models/onboarding_progress_model.go
+# path: internal/domain/onboarding/repository.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/onboarding/repository.go
+package entity
+END_FILE:internal/domain/onboarding/repository.go
+# path: internal/domain/onboarding/entity.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/onboarding/entity.go
+package entity
+END_FILE:internal/domain/onboarding/entity.go
+# path: internal/platform/database/models/role_permissions_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/role_permissions_model.go
+package models
+END_FILE:internal/platform/database/models/role_permissions_model.go
+# path: internal/platform/database/models/task_activity_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/task_activity_model.go
+package models
+END_FILE:internal/platform/database/models/task_activity_model.go
+# path: internal/platform/database/models/task_attachment_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/task_attachment_model.go
+package models
+END_FILE:internal/platform/database/models/task_attachment_model.go
+# path: internal/platform/database/models/task_comment_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/task_comment_model.go
+package models
+END_FILE:internal/platform/database/models/task_comment_model.go
+# path: internal/adapters/http/leave/routes.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/adapters/http/leave/routes.go
+package leave
+END_FILE:internal/adapters/http/leave/routes.go
+# path: internal/platform/database/models/task_type_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/task_type_model.go
+package models
+END_FILE:internal/platform/database/models/task_type_model.go
+# path: internal/adapters/http/leave/handler.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/adapters/http/leave/handler.go
+package leave
+END_FILE:internal/adapters/http/leave/handler.go
+# path: internal/adapters/http/invites/routes.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/adapters/http/invites/routes.go
+package invites
+END_FILE:internal/adapters/http/invites/routes.go
+# path: internal/platform/database/models/work_schedule_model.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/platform/database/models/work_schedule_model.go
+package models
+END_FILE:internal/platform/database/models/work_schedule_model.go
+# path: internal/adapters/http/invites/handler.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/adapters/http/invites/handler.go
+package invites
+END_FILE:internal/adapters/http/invites/handler.go
+# path: internal/domain/notifications/usecase.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/domain/notifications/usecase.go
+package entity
+END_FILE:internal/domain/notifications/usecase.go
+# path: internal/domain/notifications/repository.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/notifications/repository.go
+package entity
+END_FILE:internal/domain/notifications/repository.go
+# path: internal/domain/notifications/entity.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/notifications/entity.go
+package entity
+END_FILE:internal/domain/notifications/entity.go
+# path: internal/domain/milestones/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/usecase.go
+package entity
+END_FILE:internal/domain/milestones/usecase.go
+# path: internal/domain/milestones/repository.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/repository.go
+package entity
+END_FILE:internal/domain/milestones/repository.go
+# path: internal/domain/milestones/entity.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/entity.go
+package entity
+END_FILE:internal/domain/milestones/entity.go
+# path: internal/domain/leave/usecase.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/leave/usecase.go
+package leave
+END_FILE:internal/domain/leave/usecase.go
+# path: internal/usecase/audit/usecase.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/usecase/audit/usecase.go
+package audit
+END_FILE:internal/usecase/audit/usecase.go
+# path: internal/domain/leave/repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/leave/repository.go
+package leave
+END_FILE:internal/domain/leave/repository.go
+# path: internal/domain/leave/entity.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/leave/entity.go
+package leave
+END_FILE:internal/domain/leave/entity.go
+# path: internal/domain/invites/usecase.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/domain/invites/usecase.go
+package invites
+END_FILE:internal/domain/invites/usecase.go
+# path: internal/domain/invites/repository.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/domain/invites/repository.go
+package invites
+END_FILE:internal/domain/invites/repository.go
+# path: internal/domain/invites/entity.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/domain/invites/entity.go
+package invites
+END_FILE:internal/domain/invites/entity.go
+# path: internal/adapters/http/search/handler.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/adapters/http/search/handler.go
+package search
+END_FILE:internal/adapters/http/search/handler.go
+# path: internal/adapters/http/search/routes.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/adapters/http/search/routes.go
+package search
+END_FILE:internal/adapters/http/search/routes.go
+# path: internal/usecase/invites/usecase.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/usecase/invites/usecase.go
+package invites
+END_FILE:internal/usecase/invites/usecase.go
+# path: internal/usecase/leave/usecase.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/usecase/leave/usecase.go
+package leave
+END_FILE:internal/usecase/leave/usecase.go
+# path: internal/domain/calendar/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/calendar/usecase.go
+package audit
+END_FILE:internal/domain/calendar/usecase.go
+# path: internal/domain/calendar/repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/calendar/repository.go
+package audit
+END_FILE:internal/domain/calendar/repository.go
+# path: internal/usecase/notifications/usecase.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/usecase/notifications/usecase.go
+package usecase
+END_FILE:internal/usecase/notifications/usecase.go
+# path: internal/domain/calendar/entity.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/calendar/entity.go
+package audit
+END_FILE:internal/domain/calendar/entity.go
+# path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/audit/usecase.go
+package audit
+END_FILE:internal/domain/audit/usecase.go
+# path: internal/usecase/people/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/usecase/people/usecase.go
+package people
+END_FILE:internal/usecase/people/usecase.go
+# path: internal/adapters/http/audit/routes.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/adapters/http/audit/routes.go
+package audit
+END_FILE:internal/adapters/http/audit/routes.go
+# path: internal/usecase/search/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/usecase/search/usecase.go
+package search
+END_FILE:internal/usecase/search/usecase.go
+# path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/repository.go
+package audit
+END_FILE:internal/domain/audit/repository.go
+# path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/entity.go
+package audit
+END_FILE:internal/domain/audit/entity.go
+# path: internal/adapters/repository/search/gorm_repository.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/adapters/repository/search/gorm_repository.go
+package search
+END_FILE:internal/adapters/repository/search/gorm_repository.go
+# path: internal/adapters/http/audit/handler.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/adapters/http/audit/handler.go
+package audit
+END_FILE:internal/adapters/http/audit/handler.go
+# path: internal/adapters/repository/leave/gorm_repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/adapters/repository/leave/gorm_repository.go
+package leave
+END_FILE:internal/adapters/repository/leave/gorm_repository.go
+# path: internal/adapters/repository/invites/gorm_repository.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/adapters/repository/invites/gorm_repository.go
+package invites
+END_FILE:internal/adapters/repository/invites/gorm_repository.go
+# path: internal/adapters/repository/audit/gorm_repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/adapters/repository/audit/gorm_repository.go
+package audit
+END_FILE:internal/adapters/repository/audit/gorm_repository.go
+# included: 203 / 203 | total tokens: 34563

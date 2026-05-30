@@ -12,6 +12,8 @@ import (
 	organisationHTTP "server/internal/adapters/http/organisation"
 	projectHTTP "server/internal/adapters/http/projects"
 	taskHTTP "server/internal/adapters/http/tasks"
+	taskCommentHTTP "server/internal/adapters/http/task_comments"
+	taskAttachmentHTTP "server/internal/adapters/http/task_attachments"
 	teamHTTP "server/internal/adapters/http/teams"
 	attendanceRepo "server/internal/adapters/repository/attendance"
 	authRepo "server/internal/adapters/repository/auth"
@@ -23,6 +25,8 @@ import (
 	organisationRepo "server/internal/adapters/repository/organisation"
 	projectRepo "server/internal/adapters/repository/projects"
 	taskRepo "server/internal/adapters/repository/tasks"
+	taskCommentRepo "server/internal/adapters/repository/task_comments"
+	taskAttachmentRepo "server/internal/adapters/repository/task_attachments"
 	teamRepo "server/internal/adapters/repository/teams"
 	"server/internal/platform/database"
 	"server/internal/platform/middlewares"
@@ -37,6 +41,8 @@ import (
 	organisationUsecase "server/internal/usecase/organisation"
 	projectService "server/internal/usecase/projects"
 	taskService "server/internal/usecase/tasks"
+	taskCommentService "server/internal/usecase/task_comments"
+	taskAttachmentService "server/internal/usecase/task_attachments"
 	teamService "server/internal/usecase/teams"
 
 	"github.com/gin-gonic/gin"
@@ -64,6 +70,16 @@ func SetupRoutes(r *gin.Engine) {
 	taskUseCase := taskService.NewService(taskRepository)
 	taskHandler := taskHTTP.NewHandler(taskUseCase)
 	taskHTTP.RegisterRoutes(r, taskHandler, validateToken)
+
+	taskCommentRepository := taskCommentRepo.NewGormRepository(database.DB)
+	taskCommentUseCase := taskCommentService.NewService(taskCommentRepository)
+	taskCommentHandler := taskCommentHTTP.NewHandler(taskCommentUseCase)
+	taskCommentHTTP.RegisterRoutes(r, taskCommentHandler, validateToken)
+
+	taskAttachmentRepository := taskAttachmentRepo.NewGormRepository(database.DB)
+	taskAttachmentUseCase := taskAttachmentService.NewService(taskAttachmentRepository)
+	taskAttachmentHandler := taskAttachmentHTTP.NewHandler(taskAttachmentUseCase)
+	taskAttachmentHTTP.RegisterRoutes(r, taskAttachmentHandler, validateToken)
 
 	attendanceRepository := attendanceRepo.NewGormRepository(database.DB)
 	attendanceUseCase := attendanceService.NewService(attendanceRepository)

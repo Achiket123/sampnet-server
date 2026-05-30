@@ -79,5 +79,11 @@ func PerformMigrations() error {
 	if err := DB.AutoMigrate(&models.CallState{}); err != nil {
 		return err
 	}
+	if err := DB.AutoMigrate(&models.TaskComment{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.TaskAttachment{}); err != nil {
+		return err
+	}
 	return nil
 }
