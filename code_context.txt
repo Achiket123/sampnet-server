@@ -1,0 +1,4841 @@
+# Code Context
+# Generated: 2026-05-29T12:23:47+05:30
+# Files: 99
+#
+# To extract all files back to disk, run:
+#   awk '/^BEGIN_FILE:/{f=substr($0,11); sub(/^:/, "", f); next} /^END_FILE:/{f=""; next} f{print > f}' code_context.txt
+#
+# To extract a single file, for example src/main.go, run:
+#   awk '/^BEGIN_FILE:src\/main\.go$/{f=1;next}/^END_FILE:/{f=0}f' code_context.txt > src/main.go
+#
+# path: internal/adapters/http/employees/handler.go | lang: go | tokens: 1511 | size: 6044
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/employees/handler.go
+package employees
+
+import (
+	"net/http"
+	domain "server/internal/domain/employees"
+	authDomain "server/internal/domain/auth"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) AddEmployee(c *gin.Context) {
+	var req struct {
+		EmploymentID int    `json:"employment_id" binding:"required"`
+		FirstName    string `json:"first_name" binding:"required"`
+		LastName     string `json:"last_name" binding:"required"`
+		Email        string `json:"email" binding:"required,email"`
+		PhoneNumber  string `json:"phone_number" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	emp := &domain.Employee{
+		EmploymentID: req.EmploymentID,
+		User: authDomain.User{
+			FirstName:   req.FirstName,
+			LastName:    req.LastName,
+			Email:       req.Email,
+			PhoneNumber: req.PhoneNumber,
+		},
+	}
+
+	if err := h.uc.AddEmployee(c.Request.Context(), emp); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add employee"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Employee created successfully", "employee_id": emp.UserID})
+}
+
+func (h *Handler) MakeManager(c *gin.Context) {
+	var req struct {
+		UserID         uint   `json:"user_id" binding:"required"`
+		OrganisationID uint   `json:"organisation_id" binding:"required"`
+		Type           string `json:"type" binding:"required"`
+		Salary         string `json:"salary" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	manager := &domain.Manager{
+		UserID:         req.UserID,
+		OrganisationID: req.OrganisationID,
+		Type:           req.Type,
+		Salary:         req.Salary,
+	}
+
+	if err := h.uc.MakeManager(c.Request.Context(), manager); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Manager created successfully", "manager_id": manager.UserID})
+}
+
+func (h *Handler) IsEmployee(c *gin.Context) {
+	userID, err := strconv.Atoi(c.Param("user_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	msg, data, token, err := h.uc.IsEmployeeOrManager(c.Request.Context(), uint(userID))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": msg, "data": data, "token": token})
+}
+
+func (h *Handler) CreateBoss(c *gin.Context) {
+	var boss domain.Boss
+	if err := c.ShouldBindJSON(&boss); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.uc.CreateBoss(c.Request.Context(), &boss); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Boss created successfully", "boss": boss})
+}
+
+func (h *Handler) GetBoss(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	boss, err := h.uc.GetBoss(c.Request.Context(), userIDVal.(uint))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"boss": boss})
+}
+
+func (h *Handler) CreateEmployee(c *gin.Context) {
+	var emp domain.Employee
+	if err := c.ShouldBindJSON(&emp); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.uc.AddEmployee(c.Request.Context(), &emp); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Employee created successfully", "employee": emp})
+}
+
+func (h *Handler) GetEmployees(c *gin.Context) {
+	orgID, err := strconv.Atoi(c.Param("organisation_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+		return
+	}
+
+	users, err := h.uc.GetEmployees(c.Request.Context(), uint(orgID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"users": users})
+}
+
+func (h *Handler) GetEmployeeByID(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid employee ID"})
+		return
+	}
+
+	user, err := h.uc.GetEmployee(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Employee not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"user": user})
+}
+
+func (h *Handler) UpdateEmployee(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid employee ID"})
+		return
+	}
+
+	var emp domain.Employee
+	if err := c.ShouldBindJSON(&emp); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	emp.UserID = uint(id) // Assuming ID in param is UserID
+
+	if err := h.uc.UpdateEmployee(c.Request.Context(), &emp); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update employee"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Employee updated successfully"})
+}
+
+func (h *Handler) DeleteEmployee(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid employee ID"})
+		return
+	}
+
+	if err := h.uc.DeleteEmployee(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete employee"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Employee deleted successfully"})
+}
+
+func (h *Handler) SearchEmployee(c *gin.Context) {
+	query := c.Query("query")
+	users, err := h.uc.SearchEmployees(c.Request.Context(), query)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"users": users})
+}
+END_FILE:internal/adapters/http/employees/handler.go
+# path: internal/adapters/repository/employees/gorm_repository.go | lang: go | tokens: 1407 | size: 5629
+# functions: NewGormRepository, toModel, toDomain
+BEGIN_FILE:internal/adapters/repository/employees/gorm_repository.go
+package employees
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+	domain "server/internal/domain/employees"
+	orgDomain "server/internal/domain/organisation"
+	"server/internal/platform/database/models"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) GetByUserID(ctx context.Context, userID uint) (*domain.Employee, error) {
+	var model models.Employee
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("user_id = ?", userID).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) Create(ctx context.Context, emp *domain.Employee) error {
+	model := toModel(emp)
+	return r.db.WithContext(ctx).Create(model).Error
+}
+
+func (r *gormRepository) GetEmployeesByOrg(ctx context.Context, orgID uint) ([]domain.Employee, error) {
+	var modelsList []models.Employee
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("organisation_id = ?", orgID).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	result := make([]domain.Employee, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = *toDomain(&m)
+	}
+	return result, nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.Employee, error) {
+	var model models.Employee
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, emp *domain.Employee) error {
+	model := toModel(emp)
+	return r.db.WithContext(ctx).Model(&models.Employee{}).Where("user_id = ?", emp.UserID).Updates(model).Error
+}
+
+func (r *gormRepository) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Model(&models.Employee{}).Where("user_id = ?", id).Update("deleted_at", time.Now()).Error
+}
+
+func (r *gormRepository) Search(ctx context.Context, query string) ([]domain.Employee, error) {
+	var modelsList []models.Employee
+	// Searching in UserModel through joining
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").
+		Joins("JOIN user_models ON user_models.id = employees.user_id").
+		Where("user_models.first_name LIKE ? OR user_models.last_name LIKE ?", "%"+query+"%", "%"+query+"%").
+		Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	result := make([]domain.Employee, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = *toDomain(&m)
+	}
+	return result, nil
+}
+
+func (r *gormRepository) CreateManager(ctx context.Context, manager *domain.Manager) error {
+	model := &models.Manager{
+		UserID:         manager.UserID,
+		OrganisationID: manager.OrganisationID,
+		Type:           manager.Type,
+		Salary:         manager.Salary,
+		LastLoginAt:    manager.LastLoginAt,
+	}
+	return r.db.WithContext(ctx).Create(model).Error
+}
+
+func (r *gormRepository) GetManagerByUserID(ctx context.Context, userID uint) (*domain.Manager, error) {
+	var model models.Manager
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("user_id = ?", userID).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return &domain.Manager{
+		UserID: model.UserID,
+		User: authDomain.User{
+			ID:          model.User.ID,
+			FirstName:   model.User.FirstName,
+			LastName:    model.User.LastName,
+			Email:       model.User.Email,
+			PhoneNumber: model.User.PhoneNumber,
+		},
+		OrganisationID: model.OrganisationID,
+		Organisation: orgDomain.Entity{
+			ID:          model.Organisation.ID,
+			CompanyName: model.Organisation.CompanyName,
+		},
+		Type:        model.Type,
+		Salary:      model.Salary,
+		LastLoginAt: model.LastLoginAt,
+	}, nil
+}
+
+func (r *gormRepository) CreateBoss(ctx context.Context, boss *domain.Boss) error {
+	model := &models.Boss{
+		UserID:         boss.UserID,
+		OrganisationID: boss.OrganisationID,
+		LastLoginAt:    boss.LastLoginAt,
+	}
+	return r.db.WithContext(ctx).Create(model).Error
+}
+
+func (r *gormRepository) GetBossByUserID(ctx context.Context, userID uint) (*domain.Boss, error) {
+	var model models.Boss
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("user_id = ?", userID).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return &domain.Boss{
+		UserID: model.UserID,
+		User: authDomain.User{
+			ID:          model.User.ID,
+			FirstName:   model.User.FirstName,
+			LastName:    model.User.LastName,
+			Email:       model.User.Email,
+			PhoneNumber: model.User.PhoneNumber,
+		},
+		OrganisationID: model.OrganisationID,
+		Organisation: orgDomain.Entity{
+			ID:          model.Organisation.ID,
+			CompanyName: model.Organisation.CompanyName,
+		},
+		LastLoginAt: model.LastLoginAt,
+	}, nil
+}
+
+func toModel(e *domain.Employee) *models.Employee {
+	return &models.Employee{
+		UserID:         e.UserID,
+		EmploymentID:   e.EmploymentID,
+		OrganisationID: e.OrganisationID,
+		Type:           e.Type,
+		Salary:         e.Salary,
+		LastLoginAt:    e.LastLoginAt,
+	}
+}
+
+func toDomain(m *models.Employee) *domain.Employee {
+	return &domain.Employee{
+		UserID: m.UserID,
+		User: authDomain.User{
+			ID:          m.User.ID,
+			FirstName:   m.User.FirstName,
+			LastName:    m.User.LastName,
+			Email:       m.User.Email,
+			PhoneNumber: m.User.PhoneNumber,
+		},
+		EmploymentID:   m.EmploymentID,
+		OrganisationID: m.OrganisationID,
+		Organisation: orgDomain.Entity{
+			ID:          m.Organisation.ID,
+			CompanyName: m.Organisation.CompanyName,
+		},
+		Type:        m.Type,
+		Salary:      m.Salary,
+		LastLoginAt: m.LastLoginAt,
+	}
+}
+END_FILE:internal/adapters/repository/employees/gorm_repository.go
+# path: internal/adapters/repository/tasks/gorm_repository.go | lang: go | tokens: 1370 | size: 5481
+# functions: NewGormRepository, toModel, toDomain, toDomainList
+BEGIN_FILE:internal/adapters/repository/tasks/gorm_repository.go
+package tasks
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+	domain "server/internal/domain/tasks"
+	orgDomain "server/internal/domain/organisation"
+	teamDomain "server/internal/domain/teams"
+	projectDomain "server/internal/domain/projects"
+	"server/internal/platform/database/models"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, task *domain.Task) error {
+	model := toModel(task)
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	task.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, task *domain.Task) error {
+	model := toModel(task)
+	return r.db.WithContext(ctx).Model(&models.Task{}).Where("id = ?", task.ID).Updates(model).Error
+}
+
+func (r *gormRepository) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Model(&models.Task{}).Where("id = ?", id).Update("deleted_at", time.Now()).Error
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.Task, error) {
+	var model models.Task
+	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").Preload("Team").Preload("Project").First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) GetByTeam(ctx context.Context, userID uint) ([]domain.Task, error) {
+	var modelsList []models.Task
+	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").Where("assigned_to = ?", userID).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func (r *gormRepository) GetByProject(ctx context.Context, projectID uint, page int) ([]domain.Task, error) {
+	var modelsList []models.Task
+	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").
+		Where("project_id = ?", projectID).Limit(20).Offset((page - 1) * 20).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func (r *gormRepository) GetPersonal(ctx context.Context, userID uint, page, pageSize int) ([]domain.Task, int64, error) {
+	var modelsList []models.Task
+	var count int64
+	query := r.db.WithContext(ctx).Model(&models.Task{}).Where("assigned_to = ?", userID)
+	if err := query.Count(&count).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := query.Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").
+		Limit(pageSize).Offset((page - 1) * pageSize).Find(&modelsList).Error; err != nil {
+		return nil, 0, err
+	}
+	return toDomainList(modelsList), count, nil
+}
+
+func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint, page, pageSize int) ([]domain.Task, int64, error) {
+	var modelsList []models.Task
+	var count int64
+	query := r.db.WithContext(ctx).Model(&models.Task{}).Where("organisation_id = ?", orgID)
+	if err := query.Count(&count).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := query.Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").
+		Limit(pageSize).Offset((page - 1) * pageSize).Find(&modelsList).Error; err != nil {
+		return nil, 0, err
+	}
+	return toDomainList(modelsList), count, nil
+}
+
+func (r *gormRepository) GetByTitle(ctx context.Context, title string) ([]domain.Task, error) {
+	var modelsList []models.Task
+	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").Where("title = ?", title).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func toModel(t *domain.Task) *models.Task {
+	return &models.Task{
+		Title:          t.Title,
+		Description:    t.Description,
+		DueDate:        t.DueDate,
+		AssignedTo:     t.AssignedTo,
+		AssignedBy:     t.AssignedBy,
+		Type:           t.Type,
+		Priority:       t.Priority,
+		Status:         t.Status,
+		OrganisationID: t.OrganisationID,
+		IsPersonal:     t.IsPersonal,
+		TeamID:         t.TeamID,
+		ProjectID:      t.ProjectID,
+	}
+}
+
+func toDomain(m *models.Task) *domain.Task {
+	t := &domain.Task{
+		ID:             m.ID,
+		Title:          m.Title,
+		Description:    m.Description,
+		DueDate:        m.DueDate,
+		AssignedTo:     m.AssignedTo,
+		AssignedBy:     m.AssignedBy,
+		Type:           m.Type,
+		Priority:       m.Priority,
+		Status:         m.Status,
+		OrganisationID: m.OrganisationID,
+		IsPersonal:     m.IsPersonal,
+		TeamID:         m.TeamID,
+		ProjectID:      m.ProjectID,
+	}
+	if m.AssignedUser != nil {
+		t.AssignedUser = &authDomain.User{ID: m.AssignedUser.ID, FirstName: m.AssignedUser.FirstName, LastName: m.AssignedUser.LastName}
+	}
+	if m.AssignedByUser != nil {
+		t.AssignedByUser = &authDomain.User{ID: m.AssignedByUser.ID, FirstName: m.AssignedByUser.FirstName, LastName: m.AssignedByUser.LastName}
+	}
+	if m.Organisation != nil {
+		t.Organisation = &orgDomain.Entity{ID: m.Organisation.ID, CompanyName: m.Organisation.CompanyName}
+	}
+	if m.Team != nil {
+		t.Team = &teamDomain.Team{ID: m.Team.ID, Name: m.Team.Name}
+	}
+	if m.Project != nil {
+		t.Project = &projectDomain.Project{ID: m.Project.ID, Name: m.Project.Name}
+	}
+	return t
+}
+
+func toDomainList(modelsList []models.Task) []domain.Task {
+	result := make([]domain.Task, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = *toDomain(&m)
+	}
+	return result
+}
+END_FILE:internal/adapters/repository/tasks/gorm_repository.go
+# path: internal/app/routes/routes.go | lang: go | tokens: 1244 | size: 4976
+# functions: SetupRoutes
+BEGIN_FILE:internal/app/routes/routes.go
+package routes
+
+import (
+	attendanceHTTP "server/internal/adapters/http/attendance"
+	authHTTP "server/internal/adapters/http/auth"
+	callHTTP "server/internal/adapters/http/calls"
+	callStateHTTP "server/internal/adapters/http/callstate"
+	chatHTTP "server/internal/adapters/http/chats"
+	employeeHTTP "server/internal/adapters/http/employees"
+	fileHTTP "server/internal/adapters/http/files"
+	messageHTTP "server/internal/adapters/http/messages"
+	organisationHTTP "server/internal/adapters/http/organisation"
+	projectHTTP "server/internal/adapters/http/projects"
+	taskHTTP "server/internal/adapters/http/tasks"
+	teamHTTP "server/internal/adapters/http/teams"
+	attendanceRepo "server/internal/adapters/repository/attendance"
+	authRepo "server/internal/adapters/repository/auth"
+	callStateRepo "server/internal/adapters/repository/callstate"
+	chatRepo "server/internal/adapters/repository/chats"
+	employeeRepo "server/internal/adapters/repository/employees"
+	fileRepo "server/internal/adapters/repository/files"
+	messageRepo "server/internal/adapters/repository/messages"
+	organisationRepo "server/internal/adapters/repository/organisation"
+	projectRepo "server/internal/adapters/repository/projects"
+	taskRepo "server/internal/adapters/repository/tasks"
+	teamRepo "server/internal/adapters/repository/teams"
+	"server/internal/platform/database"
+	"server/internal/platform/middlewares"
+	attendanceService "server/internal/usecase/attendance"
+	authService "server/internal/usecase/auth"
+	callService "server/internal/usecase/calls"
+	callStateService "server/internal/usecase/callstate"
+	chatService "server/internal/usecase/chats"
+	employeeService "server/internal/usecase/employees"
+	fileService "server/internal/usecase/files"
+	messageService "server/internal/usecase/messages"
+	organisationUsecase "server/internal/usecase/organisation"
+	projectService "server/internal/usecase/projects"
+	taskService "server/internal/usecase/tasks"
+	teamService "server/internal/usecase/teams"
+
+	"github.com/gin-gonic/gin"
+)
+
+func SetupRoutes(r *gin.Engine) {
+	validateToken := middlewares.ValidateToken()
+
+	organisationRepository := organisationRepo.NewGormRepository(database.DB)
+	organisationService := organisationUsecase.NewService(organisationRepository)
+	organisationHandler := organisationHTTP.NewHandler(organisationService)
+	organisationHTTP.RegisterRoutes(r, organisationHandler, validateToken)
+
+	authRepository := authRepo.NewGormRepository(database.DB)
+	empRepository := employeeRepo.NewGormRepository(database.DB)
+	authUseCase := authService.NewService(authRepository, empRepository)
+	authHandler := authHTTP.NewHandler(authUseCase)
+	authHTTP.RegisterRoutes(r, authHandler, validateToken)
+
+	employeeUseCase := employeeService.NewService(empRepository, authRepository, organisationRepository)
+	employeeHandler := employeeHTTP.NewHandler(employeeUseCase)
+	employeeHTTP.RegisterRoutes(r, employeeHandler, validateToken)
+
+	taskRepository := taskRepo.NewGormRepository(database.DB)
+	taskUseCase := taskService.NewService(taskRepository)
+	taskHandler := taskHTTP.NewHandler(taskUseCase)
+	taskHTTP.RegisterRoutes(r, taskHandler, validateToken)
+
+	attendanceRepository := attendanceRepo.NewGormRepository(database.DB)
+	attendanceUseCase := attendanceService.NewService(attendanceRepository)
+	attendanceHandler := attendanceHTTP.NewHandler(attendanceUseCase)
+	attendanceHTTP.RegisterRoutes(r, attendanceHandler, validateToken)
+
+	teamRepository := teamRepo.NewGormRepository(database.DB)
+	teamUseCase := teamService.NewService(teamRepository)
+	teamHandler := teamHTTP.NewHandler(teamUseCase)
+	teamHTTP.RegisterRoutes(r, teamHandler, validateToken)
+
+	projectRepository := projectRepo.NewGormRepository(database.DB)
+	projectUseCase := projectService.NewService(projectRepository)
+	projectHandler := projectHTTP.NewHandler(projectUseCase)
+	projectHTTP.RegisterRoutes(r, projectHandler, validateToken)
+
+	fileRepository := fileRepo.NewGormRepository(database.DB)
+	fileUseCase := fileService.NewService(fileRepository)
+	fileHandler := fileHTTP.NewHandler(fileUseCase)
+	fileHTTP.RegisterRoutes(r, fileHandler)
+
+	chatRepository := chatRepo.NewGormRepository(database.DB)
+	chatUseCase := chatService.NewService(chatRepository)
+	chatHandler := chatHTTP.NewHandler(chatUseCase)
+	chatHTTP.RegisterRoutes(r, chatHandler, validateToken)
+
+	messageRepository := messageRepo.NewGormRepository(database.DB)
+	messageUseCase := messageService.NewService(messageRepository, chatRepository)
+	messageHandler := messageHTTP.NewHandler(messageUseCase)
+	messageHTTP.RegisterRoutes(r, messageHandler, validateToken)
+
+	callStateRepository := callStateRepo.NewGormRepository(database.DB)
+	callStateUseCase := callStateService.NewService(callStateRepository)
+	callStateHandler := callStateHTTP.NewHandler(callStateUseCase)
+	callStateHTTP.RegisterRoutes(r, callStateHandler, validateToken)
+
+	callUseCase := callService.NewService()
+	callHandler := callHTTP.NewHandler(callUseCase)
+	callHTTP.RegisterRoutes(r, callHandler)
+}
+END_FILE:internal/app/routes/routes.go
+# path: internal/adapters/http/tasks/handler.go | lang: go | tokens: 1169 | size: 4677
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/tasks/handler.go
+package tasks
+
+import (
+	"net/http"
+	domain "server/internal/domain/tasks"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) CreateTask(c *gin.Context) {
+	var task domain.Task
+	if err := c.BindJSON(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "message": err.Error()})
+		return
+	}
+
+	if err := h.uc.CreateTask(c.Request.Context(), &task); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "Task created successfully", "task": task})
+}
+
+func (h *Handler) UpdateTask(c *gin.Context) {
+	var task domain.Task
+	if err := c.ShouldBindJSON(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+	task.ID = uint(id)
+
+	updatedTask, err := h.uc.UpdateTask(c.Request.Context(), &task)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Task updated successfully", "task": updatedTask})
+}
+
+func (h *Handler) SoftDeleteTask(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
+	if err := h.uc.DeleteTask(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete task"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Task soft deleted successfully"})
+}
+
+func (h *Handler) GetTaskByID(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
+	task, err := h.uc.GetTask(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"task": task})
+}
+
+func (h *Handler) GetTeamTasks(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	tasks, err := h.uc.GetTeamTasks(c.Request.Context(), userIDVal.(uint))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tasks"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+}
+
+func (h *Handler) GetProjectTasks(c *gin.Context) {
+	projectID, _ := strconv.Atoi(c.Query("project_id")) // Assuming project_id in query
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+
+	tasks, err := h.uc.GetProjectTasks(c.Request.Context(), uint(projectID), page)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tasks"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+}
+
+func (h *Handler) GetPersonalTasks(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+
+	tasks, total, err := h.uc.GetPersonalTasks(c.Request.Context(), userIDVal.(uint), page, pageSize)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tasks"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"tasks":       tasks,
+		"total_count": total,
+		"page":        page,
+		"page_size":   pageSize,
+	})
+}
+
+func (h *Handler) GetOrganisationTasks(c *gin.Context) {
+	orgID, err := strconv.Atoi(c.Param("organisation_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+
+	tasks, total, err := h.uc.GetOrganisationTasks(c.Request.Context(), uint(orgID), page, pageSize)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tasks"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"tasks":       tasks,
+		"total_count": total,
+		"page":        page,
+		"page_size":   pageSize,
+	})
+}
+
+func (h *Handler) GetTaskByTitle(c *gin.Context) {
+	title := c.Param("title")
+	tasks, err := h.uc.GetTaskByTitle(c.Request.Context(), title)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch task"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"task": tasks})
+}
+END_FILE:internal/adapters/http/tasks/handler.go
+# path: internal/adapters/repository/organisation/gorm_repository.go | lang: go | tokens: 1011 | size: 4046
+# functions: NewGormRepository, toModel, toEntity
+BEGIN_FILE:internal/adapters/repository/organisation/gorm_repository.go
+package organisation
+
+import (
+	"context"
+	domain "server/internal/domain/organisation"
+	"server/internal/platform/database/models"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// GormRepository implements organisation.Repository with GORM.
+type GormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) *GormRepository {
+	return &GormRepository{db: db}
+}
+
+func (r *GormRepository) Create(ctx context.Context, org *domain.Entity) error {
+	model := toModel(org)
+	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		return err
+	}
+	org.ID = model.ID
+	return nil
+}
+
+func (r *GormRepository) CreateWithOwner(ctx context.Context, org *domain.Entity, ownerUserID uint) (*domain.OwnerEmployeeRow, error) {
+	var createdEmployee domain.OwnerEmployeeRow
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		model := toModel(org)
+		if err := tx.Create(&model).Error; err != nil {
+			return err
+		}
+
+		org.ID = model.ID
+
+		employee := models.Employee{
+			UserID:         ownerUserID,
+			OrganisationID: model.ID,
+			EmploymentID:   int(model.ID),
+			Type:           "owner",
+			LastLoginAt:    time.Now().UTC(),
+		}
+
+		if err := tx.Create(&employee).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&models.Organisation{}).Where("id = ?", model.ID).Update("boss_id", ownerUserID).Error; err != nil {
+			return err
+		}
+
+		org.BossID = ownerUserID
+		createdEmployee = domain.OwnerEmployeeRow{
+			UserID:         employee.UserID,
+			EmploymentID:   employee.EmploymentID,
+			OrganisationID: employee.OrganisationID,
+			Type:           employee.Type,
+			Salary:         employee.Salary,
+			LastLoginAt:    employee.LastLoginAt,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &createdEmployee, nil
+}
+
+func (r *GormRepository) GetByID(ctx context.Context, id uint) (*domain.Entity, error) {
+	var model models.Organisation
+	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	entity := toEntity(model)
+	return &entity, nil
+}
+
+func (r *GormRepository) Update(ctx context.Context, org *domain.Entity) error {
+	model := toModel(org)
+	return r.db.WithContext(ctx).Model(&models.Organisation{}).Where("id = ?", org.ID).Updates(&model).Error
+}
+
+func toModel(org *domain.Entity) models.Organisation {
+	return models.Organisation{
+		Model:              gorm.Model{ID: org.ID},
+		CompanyName:        org.CompanyName,
+		CompanyCode:        org.CompanyCode,
+		PrimaryContactName: org.PrimaryContactName,
+		PrimaryEmail:       org.PrimaryEmail,
+		PhoneNumber:        org.PhoneNumber,
+		OfficeAddress:      org.OfficeAddress,
+		City:               org.City,
+		State:              org.State,
+		PostalCode:         org.PostalCode,
+		Country:            org.Country,
+		PlanID:             org.PlanID,
+		PlanStartDate:      org.PlanStartDate,
+		PlanEndDate:        org.PlanEndDate,
+		PlanStatus:         org.PlanStatus,
+		MaxEmployees:       org.MaxEmployees,
+		CompanyLogo:        org.CompanyLogo,
+		Industry:           org.Industry,
+		BillingAddress:     org.BillingAddress,
+		CompanySize:        org.CompanySize,
+		BossID:             org.BossID,
+	}
+}
+
+func toEntity(model models.Organisation) domain.Entity {
+	return domain.Entity{
+		ID:                 model.ID,
+		CompanyName:        model.CompanyName,
+		CompanyCode:        model.CompanyCode,
+		PrimaryContactName: model.PrimaryContactName,
+		PrimaryEmail:       model.PrimaryEmail,
+		PhoneNumber:        model.PhoneNumber,
+		OfficeAddress:      model.OfficeAddress,
+		City:               model.City,
+		State:              model.State,
+		PostalCode:         model.PostalCode,
+		Country:            model.Country,
+		PlanID:             model.PlanID,
+		PlanStartDate:      model.PlanStartDate,
+		PlanEndDate:        model.PlanEndDate,
+		PlanStatus:         model.PlanStatus,
+		MaxEmployees:       model.MaxEmployees,
+		CompanyLogo:        model.CompanyLogo,
+		Industry:           model.Industry,
+		BillingAddress:     model.BillingAddress,
+		CompanySize:        model.CompanySize,
+		BossID:             model.BossID,
+	}
+}
+END_FILE:internal/adapters/repository/organisation/gorm_repository.go
+# path: internal/adapters/http/auth/handler.go | lang: go | tokens: 989 | size: 3956
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/auth/handler.go
+package auth
+
+import (
+	"errors"
+	"net/http"
+	domain "server/internal/domain/auth"
+	usecase "server/internal/usecase/auth"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) SignUp(c *gin.Context) {
+	var req struct {
+		FirstName   string `form:"first_name" binding:"required"`
+		LastName    string `form:"last_name" binding:"required"`
+		Email       string `form:"email" binding:"required,email"`
+		Password    string `form:"password" binding:"required"`
+		City        string `form:"city"`
+		Country     string `form:"country"`
+		PhoneNumber string `form:"phone_number" binding:"required"`
+		ProfilePic  string `form:"profile_pic"`
+	}
+
+	if err := c.ShouldBind(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	user := &domain.User{
+		FirstName:   req.FirstName,
+		LastName:    req.LastName,
+		Email:       req.Email,
+		City:        req.City,
+		Country:     req.Country,
+		PhoneNumber: req.PhoneNumber,
+		ProfilePic:  req.ProfilePic,
+	}
+
+	token, err := h.uc.SignUp(c.Request.Context(), user, req.Password)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign up", "message": err.Error()})
+		return
+	}
+
+	c.Header("Authorization", token)
+	c.JSON(http.StatusOK, gin.H{"message": "User created successfully"})
+}
+
+func (h *Handler) SignIn(c *gin.Context) {
+	email := c.Request.FormValue("email")
+	password := c.Request.FormValue("password")
+
+	if email == "" || password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email and password are required"})
+		return
+	}
+
+	token, err := h.uc.SignIn(c.Request.Context(), email, password)
+	if err != nil {
+		if errors.Is(err, usecase.ErrInvalidCredentials) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign in"})
+		return
+	}
+
+	c.Header("Authorization", token)
+	c.JSON(http.StatusOK, gin.H{"message": "Sign in successful"})
+}
+
+func (h *Handler) CompleteSignIn(c *gin.Context) {
+	var req struct {
+		Email       string `json:"email" binding:"required,email"`
+		PhoneNumber string `json:"phone_number" binding:"required"`
+		Password    string `json:"password" binding:"required"`
+		City        string `json:"city" binding:"required"`
+		Country     string `json:"country" binding:"required"`
+		ProfilePic  string `json:"profile_pic" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	token, err := h.uc.CompleteSignIn(c.Request.Context(), req.Email, req.PhoneNumber, req.Password, req.City, req.Country, req.ProfilePic)
+	if err != nil {
+		if errors.Is(err, usecase.ErrUserNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete sign in"})
+		return
+	}
+
+	c.Header("Authorization", token)
+	c.JSON(http.StatusOK, gin.H{"message": "User updated successfully"})
+}
+
+func (h *Handler) ValidateEmployee(c *gin.Context) {
+	// Assuming userID is in the token and middleware already validated it
+	// In the original code, it decoded the token to get userID.
+	// We can use a value set in the context by the ValidateToken middleware.
+	
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	userID := userIDVal.(uint)
+
+	token, err := h.uc.ValidateEmployee(c.Request.Context(), userID)
+	if err != nil {
+		if errors.Is(err, usecase.ErrNotAnEmployee) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate employee"})
+		return
+	}
+
+	c.Header("Authorization", token)
+	c.JSON(http.StatusOK, gin.H{"message": "Employee validated successfully"})
+}
+END_FILE:internal/adapters/http/auth/handler.go
+# path: internal/adapters/repository/teams/gorm_repository.go | lang: go | tokens: 982 | size: 3930
+# functions: NewGormRepository, toModel, toDomain, toDomainList
+BEGIN_FILE:internal/adapters/repository/teams/gorm_repository.go
+package teams
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+	orgDomain "server/internal/domain/organisation"
+	domain "server/internal/domain/teams"
+	"server/internal/platform/database/models"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, team *domain.Team) error {
+	model := toModel(team)
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	team.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.Team, error) {
+	var model models.Team
+	if err := r.db.WithContext(ctx).Preload("Organisation").Preload("CreatedByUser").Preload("TeamLeadUser").First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, team *domain.Team) error {
+	model := toModel(team)
+	return r.db.WithContext(ctx).Save(model).Error
+}
+
+func (r *gormRepository) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Delete(&models.Team{}, id).Error
+}
+
+func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint) ([]domain.Team, error) {
+	var modelsList []models.Team
+	if err := r.db.WithContext(ctx).Preload("Organisation").Preload("CreatedByUser").Preload("TeamLeadUser").Where("organisation_id = ?", orgID).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func (r *gormRepository) GetAll(ctx context.Context) ([]domain.Team, error) {
+	var modelsList []models.Team
+	if err := r.db.WithContext(ctx).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func (r *gormRepository) CreateMember(ctx context.Context, member *domain.TeamMember) error {
+	model := &models.TeamMember{
+		UserID:   member.UserID,
+		TeamID:   member.TeamID,
+		Role:     member.Role,
+		IsActive: member.IsActive,
+		IsLeader: member.IsLeader,
+	}
+	return r.db.WithContext(ctx).Create(model).Error
+}
+
+func (r *gormRepository) GetMembersByTeam(ctx context.Context, teamID uint) ([]domain.TeamMember, error) {
+	var modelsList []models.TeamMember
+	if err := r.db.WithContext(ctx).Preload("User").Where("team_id = ?", teamID).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	result := make([]domain.TeamMember, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = domain.TeamMember{
+			ID:     m.ID,
+			UserID: m.UserID,
+			TeamID: m.TeamID,
+			User: authDomain.User{
+				ID:        m.User.ID,
+				FirstName: m.User.FirstName,
+				LastName:  m.User.LastName,
+			},
+			Role:     m.Role,
+			IsActive: m.IsActive,
+			IsLeader: m.IsLeader,
+		}
+	}
+	return result, nil
+}
+
+func toModel(t *domain.Team) *models.Team {
+	model := &models.Team{
+		Name:           t.Name,
+		Description:    t.Description,
+		OrganisationID: t.OrganisationID,
+		CreatedBy:      t.CreatedBy,
+		TeamLead:       t.TeamLead,
+		IsActive:       t.IsActive,
+	}
+	model.ID = t.ID
+	return model
+}
+
+func toDomain(m *models.Team) *domain.Team {
+	t := &domain.Team{
+		ID:             m.ID,
+		Name:           m.Name,
+		Description:    m.Description,
+		OrganisationID: m.OrganisationID,
+		CreatedBy:      m.CreatedBy,
+		TeamLead:       m.TeamLead,
+		IsActive:       m.IsActive,
+	}
+	t.Organisation = orgDomain.Entity{ID: m.Organisation.ID, CompanyName: m.Organisation.CompanyName}
+	t.TeamLeadUser = authDomain.User{ID: m.TeamLeadUser.ID, FirstName: m.TeamLeadUser.FirstName, LastName: m.TeamLeadUser.LastName}
+	t.CreatedByUser = authDomain.User{ID: m.CreatedByUser.ID, FirstName: m.CreatedByUser.FirstName, LastName: m.CreatedByUser.LastName}
+	return t
+}
+
+func toDomainList(modelsList []models.Team) []domain.Team {
+	result := make([]domain.Team, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = *toDomain(&m)
+	}
+	return result
+}
+END_FILE:internal/adapters/repository/teams/gorm_repository.go
+# path: internal/adapters/repository/projects/gorm_repository.go | lang: go | tokens: 958 | size: 3835
+# functions: NewGormRepository, toModel, toDomain, toDomainList
+BEGIN_FILE:internal/adapters/repository/projects/gorm_repository.go
+package projects
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+	domain "server/internal/domain/projects"
+	orgDomain "server/internal/domain/organisation"
+	teamDomain "server/internal/domain/teams"
+	"server/internal/platform/database/models"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, project *domain.Project) error {
+	model := toModel(project)
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	project.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.Project, error) {
+	var model models.Project
+	if err := r.db.WithContext(ctx).Preload("Team").Preload("CreatedByUser").Preload("Organisation").First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, project *domain.Project) error {
+	model := toModel(project)
+	return r.db.WithContext(ctx).Save(model).Error
+}
+
+func (r *gormRepository) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Delete(&models.Project{}, id).Error
+}
+
+func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint) ([]domain.Project, error) {
+	var modelsList []models.Project
+	if err := r.db.WithContext(ctx).Preload("Team").Preload("CreatedByUser").Where("organisation_id = ?", orgID).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func (r *gormRepository) GetByTeam(ctx context.Context, teamID uint) ([]domain.Project, error) {
+	var modelsList []models.Project
+	if err := r.db.WithContext(ctx).Preload("Team").Preload("CreatedByUser").Where("team_id = ?", teamID).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func (r *gormRepository) GetWithLessData(ctx context.Context, orgID uint) ([]domain.Project, error) {
+	var modelsList []models.Project
+	if err := r.db.WithContext(ctx).Where("organisation_id = ?", orgID).Select("id", "name", "description").Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	result := make([]domain.Project, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = domain.Project{
+			ID:          m.ID,
+			Name:        m.Name,
+			Description: m.Description,
+		}
+	}
+	return result, nil
+}
+
+func toModel(p *domain.Project) *models.Project {
+	model := &models.Project{
+		Name:             p.Name,
+		Description:      p.Description,
+		StartDate:        p.StartDate,
+		EndDate:          p.EndDate,
+		OrganisationID:   p.OrganisationID,
+		TeamID:           p.TeamID,
+		CreatedBy:        p.CreatedBy,
+		Status:           p.Status,
+		Priority:         p.Priority,
+		CompletionStatus: p.CompletionStatus,
+	}
+	model.ID = p.ID
+	return model
+}
+
+func toDomain(m *models.Project) *domain.Project {
+	p := &domain.Project{
+		ID:               m.ID,
+		Name:             m.Name,
+		Description:      m.Description,
+		StartDate:        m.StartDate,
+		EndDate:          m.EndDate,
+		OrganisationID:   m.OrganisationID,
+		TeamID:           m.TeamID,
+		CreatedBy:        m.CreatedBy,
+		Status:           m.Status,
+		Priority:         m.Priority,
+		CompletionStatus: m.CompletionStatus,
+	}
+	p.Organisation = orgDomain.Entity{ID: m.Organisation.ID, CompanyName: m.Organisation.CompanyName}
+	p.Team = teamDomain.Team{ID: m.Team.ID, Name: m.Team.Name}
+	p.CreatedByUser = authDomain.User{ID: m.CreatedByUser.ID, FirstName: m.CreatedByUser.FirstName, LastName: m.CreatedByUser.LastName}
+	return p
+}
+
+func toDomainList(modelsList []models.Project) []domain.Project {
+	result := make([]domain.Project, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = *toDomain(&m)
+	}
+	return result
+}
+END_FILE:internal/adapters/repository/projects/gorm_repository.go
+# path: internal/adapters/http/projects/handler.go | lang: go | tokens: 954 | size: 3819
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/projects/handler.go
+package projects
+
+import (
+	"net/http"
+	domain "server/internal/domain/projects"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) CreateProject(c *gin.Context) {
+	var project domain.Project
+	if err := c.BindJSON(&project); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if err := h.uc.CreateProject(c.Request.Context(), &project); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create project"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Project created successfully", "project": project})
+}
+
+func (h *Handler) GetProject(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+		return
+	}
+
+	project, err := h.uc.GetProject(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get project", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Project fetched successfully", "project": project})
+}
+
+func (h *Handler) GetProjectsByOrganisation(c *gin.Context) {
+	orgID, err := strconv.Atoi(c.Param("organisation_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+		return
+	}
+
+	projects, err := h.uc.GetProjectsByOrganisation(c.Request.Context(), uint(orgID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get projects", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Projects fetched successfully", "projects": projects})
+}
+
+func (h *Handler) UpdateProject(c *gin.Context) {
+	var project domain.Project
+	if err := c.BindJSON(&project); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+		return
+	}
+	project.ID = uint(id)
+
+	if err := h.uc.UpdateProject(c.Request.Context(), &project); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update project"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Project updated successfully", "project": project})
+}
+
+func (h *Handler) GetProjectsByTeam(c *gin.Context) {
+	teamID, err := strconv.Atoi(c.Param("team_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+
+	projects, err := h.uc.GetProjectsByTeam(c.Request.Context(), uint(teamID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get projects"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Projects fetched successfully", "projects": projects})
+}
+
+func (h *Handler) GetProjectsWithLessData(c *gin.Context) {
+	orgID, err := strconv.Atoi(c.Param("organisation_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+		return
+	}
+
+	projects, err := h.uc.GetProjectsWithLessData(c.Request.Context(), uint(orgID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get projects"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Projects fetched successfully", "projects": projects})
+}
+
+func (h *Handler) DeleteProject(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+		return
+	}
+
+	if err := h.uc.DeleteProject(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete project"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Project deleted successfully"})
+}
+END_FILE:internal/adapters/http/projects/handler.go
+# path: internal/usecase/auth/usecase.go | lang: go | tokens: 867 | size: 3470
+# functions: NewService
+BEGIN_FILE:internal/usecase/auth/usecase.go
+package auth
+
+import (
+	"context"
+	"errors"
+	domain "server/internal/domain/auth"
+	empDomain "server/internal/domain/employees"
+	"server/internal/platform/miscallenous"
+	"server/internal/platform/database/models"
+	"time"
+)
+
+var (
+	ErrUserAlreadyExists = errors.New("user already exists")
+	ErrInvalidCredentials = errors.New("invalid email or password")
+	ErrUserNotFound      = errors.New("user not found")
+	ErrNotAnEmployee     = errors.New("user is not an employee")
+)
+
+type service struct {
+	repo    domain.Repository
+	empRepo empDomain.Repository
+}
+
+func NewService(repo domain.Repository, empRepo empDomain.Repository) domain.UseCase {
+	return &service{
+		repo:    repo,
+		empRepo: empRepo,
+	}
+}
+
+func (s *service) SignUp(ctx context.Context, user *domain.User, password string) (string, error) {
+	hashedPassword, err := miscallenous.HashPassword(password)
+	if err != nil {
+		return "", err
+	}
+	user.HashedPassword = hashedPassword
+	user.LastLoginAt = time.Now()
+
+	if err := s.repo.Create(ctx, user); err != nil {
+		return "", err
+	}
+
+	// Map domain user to model for JWT generation (as current JWT helper expects model)
+	// Ideally, the JWT helper should take a domain entity or a generic interface.
+	userModel := models.UserModel{
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+		Email:     user.Email,
+	}
+	userModel.ID = user.ID
+
+	token, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+func (s *service) SignIn(ctx context.Context, email, password string) (string, error) {
+	user, err := s.repo.GetByEmail(ctx, email)
+	if err != nil {
+		return "", ErrInvalidCredentials
+	}
+
+	if !miscallenous.VerifyPassword(user.HashedPassword, password) {
+		return "", ErrInvalidCredentials
+	}
+
+	userModel := models.UserModel{
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+		Email:     user.Email,
+	}
+	userModel.ID = user.ID
+
+	token, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+func (s *service) CompleteSignIn(ctx context.Context, email, phone, password, city, country, profilePic string) (string, error) {
+	user, err := s.repo.GetByEmail(ctx, email)
+	if err != nil {
+		user, err = s.repo.GetByPhoneNumber(ctx, phone)
+		if err != nil {
+			return "", ErrUserNotFound
+		}
+	}
+
+	hashedPassword, err := miscallenous.HashPassword(password)
+	if err != nil {
+		return "", err
+	}
+
+	user.HashedPassword = hashedPassword
+	user.City = city
+	user.Country = country
+	user.ProfilePic = profilePic
+	user.IsVerified = true
+	user.LastLoginAt = time.Now()
+
+	if err := s.repo.Update(ctx, user); err != nil {
+		return "", err
+	}
+
+	userModel := models.UserModel{
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+		Email:     user.Email,
+	}
+	userModel.ID = user.ID
+
+	token, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+func (s *service) ValidateEmployee(ctx context.Context, userID uint) (string, error) {
+	employee, err := s.empRepo.GetByUserID(ctx, userID)
+	if err != nil {
+		return "", ErrNotAnEmployee
+	}
+
+	// Map to model for JWT generation
+	empModel := models.Employee{
+		UserID:         employee.UserID,
+		OrganisationID: employee.OrganisationID,
+		Type:           employee.Type,
+	}
+
+	token, err := miscallenous.GenerateJWTToken(empModel, "employee", employee.UserID)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+END_FILE:internal/usecase/auth/usecase.go
+# path: internal/adapters/http/teams/handler.go | lang: go | tokens: 806 | size: 3227
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/teams/handler.go
+package teams
+
+import (
+	"net/http"
+	domain "server/internal/domain/teams"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) CreateTeam(c *gin.Context) {
+	var req struct {
+		Name           string `json:"name"`
+		Description    string `json:"description"`
+		OrganisationID uint   `json:"organisation_id"`
+		CreatedBy      uint   `json:"created_by"`
+		TeamLead       uint   `json:"team_lead"`
+		Members        []uint `json:"members"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid request body", "error": err.Error()})
+		return
+	}
+
+	team := &domain.Team{
+		Name:           req.Name,
+		Description:    req.Description,
+		OrganisationID: req.OrganisationID,
+		CreatedBy:      req.CreatedBy,
+		TeamLead:       req.TeamLead,
+	}
+
+	if err := h.uc.CreateTeam(c.Request.Context(), team, req.Members); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create team", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Team created successfully", "team": team})
+}
+
+func (h *Handler) GetTeam(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+
+	team, members, err := h.uc.GetTeam(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get team", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Team fetched successfully", "team": team, "team_members": members})
+}
+
+func (h *Handler) GetTeamsByOrganisation(c *gin.Context) {
+	orgID, err := strconv.Atoi(c.Param("organisation_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+		return
+	}
+
+	teams, err := h.uc.GetTeamsByOrganisation(c.Request.Context(), uint(orgID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get teams", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Teams fetched successfully", "teams": teams})
+}
+
+func (h *Handler) UpdateTeam(c *gin.Context) {
+	var team domain.Team
+	if err := c.BindJSON(&team); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+	team.ID = uint(id)
+
+	if err := h.uc.UpdateTeam(c.Request.Context(), &team); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update team"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Team updated successfully"})
+}
+
+func (h *Handler) DeleteTeam(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+
+	if err := h.uc.DeleteTeam(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete team"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Team deleted successfully"})
+}
+END_FILE:internal/adapters/http/teams/handler.go
+# path: internal/usecase/employees/usecase.go | lang: go | tokens: 760 | size: 3042
+# functions: NewService
+BEGIN_FILE:internal/usecase/employees/usecase.go
+package employees
+
+import (
+	"context"
+	domain "server/internal/domain/employees"
+	authDomain "server/internal/domain/auth"
+	orgDomain "server/internal/domain/organisation"
+	"server/internal/platform/miscallenous"
+	"errors"
+)
+
+type service struct {
+	repo     domain.Repository
+	userRepo authDomain.Repository
+	orgRepo  orgDomain.Repository
+}
+
+func NewService(repo domain.Repository, userRepo authDomain.Repository, orgRepo orgDomain.Repository) domain.UseCase {
+	return &service{
+		repo:     repo,
+		userRepo: userRepo,
+		orgRepo:  orgRepo,
+	}
+}
+
+func (s *service) AddEmployee(ctx context.Context, emp *domain.Employee) error {
+	// If UserID is 0, we might need to create the user first (based on original logic)
+	// But usually, we'd expect the user to exist or provide user details.
+	// Looking at AddEmployees, it takes user details.
+	
+	if emp.UserID == 0 {
+		user := &authDomain.User{
+			FirstName:   emp.User.FirstName,
+			LastName:    emp.User.LastName,
+			Email:       emp.User.Email,
+			PhoneNumber: emp.User.PhoneNumber,
+		}
+		if err := s.userRepo.Create(ctx, user); err != nil {
+			return err
+		}
+		emp.UserID = user.ID
+	}
+
+	return s.repo.Create(ctx, emp)
+}
+
+func (s *service) GetEmployees(ctx context.Context, orgID uint) ([]domain.Employee, error) {
+	return s.repo.GetEmployeesByOrg(ctx, orgID)
+}
+
+func (s *service) GetEmployee(ctx context.Context, id uint) (*domain.Employee, error) {
+	return s.repo.GetByID(ctx, id)
+}
+
+func (s *service) UpdateEmployee(ctx context.Context, emp *domain.Employee) error {
+	return s.repo.Update(ctx, emp)
+}
+
+func (s *service) DeleteEmployee(ctx context.Context, id uint) error {
+	return s.repo.Delete(ctx, id)
+}
+
+func (s *service) SearchEmployees(ctx context.Context, query string) ([]domain.Employee, error) {
+	return s.repo.Search(ctx, query)
+}
+
+func (s *service) MakeManager(ctx context.Context, manager *domain.Manager) error {
+	// Validate user
+	if _, err := s.userRepo.GetByID(ctx, manager.UserID); err != nil {
+		return errors.New("user not found")
+	}
+	// Validate organisation
+	if _, err := s.orgRepo.GetByID(ctx, manager.OrganisationID); err != nil {
+		return errors.New("organisation not found")
+	}
+	return s.repo.CreateManager(ctx, manager)
+}
+
+func (s *service) IsEmployeeOrManager(ctx context.Context, userID uint) (string, interface{}, string, error) {
+	manager, err := s.repo.GetManagerByUserID(ctx, userID)
+	if err == nil {
+		token, err := miscallenous.GenerateJWTToken(manager, "manager", manager.UserID)
+		return "Manager found", manager, token, err
+	}
+
+	employee, err := s.repo.GetByUserID(ctx, userID)
+	if err == nil {
+		token, err := miscallenous.GenerateJWTToken(employee, "employee", employee.UserID)
+		return "Employee found", employee, token, err
+	}
+
+	return "", nil, "", errors.New("user not found as employee or manager")
+}
+
+func (s *service) CreateBoss(ctx context.Context, boss *domain.Boss) error {
+	return s.repo.CreateBoss(ctx, boss)
+}
+
+func (s *service) GetBoss(ctx context.Context, userID uint) (*domain.Boss, error) {
+	return s.repo.GetBossByUserID(ctx, userID)
+}
+END_FILE:internal/usecase/employees/usecase.go
+# path: internal/platform/database/models/user_model.go | lang: go | tokens: 675 | size: 2700
+BEGIN_FILE:internal/platform/database/models/user_model.go
+package models
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type UserModel struct {
+	gorm.Model
+	FirstName      string    `gorm:"column:first_name"  json:"first_name" validate:"required,min=2,max=100"`
+	LastName       string    `gorm:"column:last_name" json:"last_name" validate:"required,min=2,max=100"`
+	Email          string    `gorm:"column:email" json:"email" validate:"required,email"`
+	PhoneNumber    string    `gorm:"column:phone_number;unique" json:"phone_number" validate:"required,len=10"`
+	IsVerified     bool      `gorm:"column:is_verified;default:false" json:"is_verified"`
+	HashedPassword string    `gorm:"column:hashed_password" `
+	ProfilePic     string    `gorm:"column:profile_id" json:"profile_id"`
+	City           string    `gorm:"column:city" json:"city"`
+	Country        string    `gorm:"column:country" json:"country"`
+	DateOfBirth    time.Time `gorm:"column:date_of_birth" json:"date_of_birth"`
+	LastLoginAt    time.Time `gorm:"column:last_login_at" json:"last_login_at"`
+}
+
+type Employee struct {
+	UserID         uint         `gorm:"column:user_id;references:ID" json:"user_id"`
+	User           UserModel    `gorm:"foreignKey:UserID;references:ID"`
+	EmploymentID   int          `gorm:"column:employment_id" json:"employment_id"`
+	OrganisationID uint         `gorm:"column:organisation_id;references:ID" json:"organisation_id"`
+	Organisation   Organisation `gorm:"foreignKey:OrganisationID;references:ID"`
+	Type           string       `gorm:"column:type" json:"type"`
+	Salary         string       `gorm:"column:salary" json:"salary"`
+	LastLoginAt    time.Time    `gorm:"column:last_login_at" json:"last_login_at"`
+}
+
+type Manager struct {
+	UserID         uint         `gorm:"column:user_id" json:"user_id"`
+	User           UserModel    `gorm:"foreignKey:UserID;references:ID"`
+	EmploymentID   int          `gorm:"column:employment_id" json:"employment_id"`
+	OrganisationID uint         `gorm:"column:organisation_id" json:"organisation_id"`
+	Organisation   Organisation `gorm:"foreignKey:OrganisationID;references:ID"`
+	Type           string       `gorm:"column:type" json:"type"`
+	Salary         string       `gorm:"column:salary" json:"salary"`
+	LastLoginAt    time.Time    `gorm:"column:last_login_at" json:"last_login_at"`
+}
+
+type Boss struct {
+	UserID         uint         `gorm:"column:user_id" json:"user_id"`
+	User           UserModel    `gorm:"foreignKey:UserID;references:ID"`
+	OrganisationID uint         `gorm:"column:organisation_id" json:"organisation_id"`
+	Organisation   Organisation `gorm:"foreignKey:OrganisationID;references:ID"`
+	LastLoginAt    time.Time    `gorm:"column:last_login_at" json:"last_login_at"`
+}
+END_FILE:internal/platform/database/models/user_model.go
+# path: internal/adapters/repository/attendance/gorm_repository.go | lang: go | tokens: 644 | size: 2577
+# functions: NewGormRepository, toModel, toDomain, toDomainList
+BEGIN_FILE:internal/adapters/repository/attendance/gorm_repository.go
+package attendance
+
+import (
+	"context"
+	domain "server/internal/domain/attendance"
+	"server/internal/platform/database/models"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, att *domain.Attendance) error {
+	model := toModel(att)
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	att.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) GetByUserAndDate(ctx context.Context, userID uint, date time.Time) (*domain.Attendance, error) {
+	var model models.Attendance
+	if err := r.db.WithContext(ctx).Where("user_id = ? AND date = ?", userID, date.Format("2006-01-02")).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, att *domain.Attendance) error {
+	model := toModel(att)
+	return r.db.WithContext(ctx).Save(model).Error
+}
+
+func (r *gormRepository) GetByUser(ctx context.Context, userID uint, offset int) ([]domain.Attendance, error) {
+	var modelsList []models.Attendance
+	if err := r.db.WithContext(ctx).Where("user_id = ?", userID).Offset(offset).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint, offset int) ([]domain.Attendance, error) {
+	var modelsList []models.Attendance
+	if err := r.db.WithContext(ctx).Where("organisation_id = ?", orgID).Offset(offset).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func toModel(a *domain.Attendance) *models.Attendance {
+	model := &models.Attendance{
+		UserID:         a.UserID,
+		Date:           a.Date,
+		CheckInTime:    a.CheckInTime,
+		CheckOutTime:   a.CheckOutTime,
+		OrganisationID: a.OrganisationID,
+		CheckInPhoto:   a.CheckInPhoto,
+		CheckOutPhoto:  a.CheckOutPhoto,
+	}
+	model.ID = a.ID
+	return model
+}
+
+func toDomain(m *models.Attendance) *domain.Attendance {
+	return &domain.Attendance{
+		ID:             m.ID,
+		UserID:         m.UserID,
+		Date:           m.Date,
+		CheckInTime:    m.CheckInTime,
+		CheckOutTime:   m.CheckOutTime,
+		OrganisationID: m.OrganisationID,
+		CheckInPhoto:   m.CheckInPhoto,
+		CheckOutPhoto:  m.CheckOutPhoto,
+	}
+}
+
+func toDomainList(modelsList []models.Attendance) []domain.Attendance {
+	result := make([]domain.Attendance, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = *toDomain(&m)
+	}
+	return result
+}
+END_FILE:internal/adapters/repository/attendance/gorm_repository.go
+# path: internal/usecase/calls/usecase.go | lang: go | tokens: 642 | size: 2570
+# functions: NewService
+BEGIN_FILE:internal/usecase/calls/usecase.go
+package calls
+
+import (
+	"context"
+	"log"
+	"sync"
+	domain "server/internal/domain/calls"
+	"github.com/gorilla/websocket"
+)
+
+type Room struct {
+	Offer      *Message
+	Clients    map[*websocket.Conn]bool
+	Candidates []Message
+	mu         sync.Mutex
+}
+
+type Message struct {
+	Type      string      `json:"type"`
+	Offer     interface{} `json:"offer,omitempty"`
+	Answer    interface{} `json:"answer,omitempty"`
+	Candidate interface{} `json:"candidate,omitempty"`
+}
+
+var rooms = make(map[string]*Room)
+var roomsMu sync.Mutex
+
+type service struct{}
+
+func NewService() domain.UseCase {
+	return &service{}
+}
+
+func (s *service) HandleRoom(ctx context.Context, roomID string, ws *websocket.Conn) {
+	log.Printf("Client joined room: %s", roomID)
+
+	roomsMu.Lock()
+	room, ok := rooms[roomID]
+	if !ok {
+		room = &Room{
+			Clients:    make(map[*websocket.Conn]bool),
+			Candidates: []Message{},
+		}
+		rooms[roomID] = room
+	}
+	roomsMu.Unlock()
+
+	if room.Offer != nil {
+		log.Print("Sending offer to client")
+		ws.WriteJSON(*room.Offer)
+	}
+
+	room.mu.Lock()
+	room.Clients[ws] = true
+	room.mu.Unlock()
+
+	defer func() {
+		room.mu.Lock()
+		delete(room.Clients, ws)
+		if len(room.Clients) == 0 {
+			roomsMu.Lock()
+			delete(rooms, roomID)
+			roomsMu.Unlock()
+		}
+		room.mu.Unlock()
+		ws.Close()
+	}()
+
+	for {
+		var msg Message
+		err := ws.ReadJSON(&msg)
+		if err != nil {
+			log.Printf("Error reading message from room %s: %v", roomID, err)
+			break
+		}
+
+		switch msg.Type {
+		case "offer":
+			s.handleOffer(room, ws, msg)
+		case "answer":
+			s.handleAnswer(room, ws, msg)
+		case "candidate":
+			s.handleCandidate(room, msg)
+		case "endCall":
+			s.handleEndCall(room, ws)
+		}
+	}
+}
+
+func (s *service) handleOffer(room *Room, ws *websocket.Conn, msg Message) {
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	room.Offer = &msg
+	for client := range room.Clients {
+		if client != ws {
+			client.WriteJSON(msg)
+		}
+	}
+}
+
+func (s *service) handleAnswer(room *Room, ws *websocket.Conn, msg Message) {
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	for client := range room.Clients {
+		if client != ws {
+			client.WriteJSON(msg)
+		}
+	}
+}
+
+func (s *service) handleCandidate(room *Room, msg Message) {
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	if len(room.Clients) < 2 {
+		room.Candidates = append(room.Candidates, msg)
+		return
+	}
+
+	for client := range room.Clients {
+		client.WriteJSON(msg)
+	}
+}
+
+func (s *service) handleEndCall(room *Room, ws *websocket.Conn) {
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	for client := range room.Clients {
+		if client != ws {
+			client.WriteJSON(Message{Type: "endCall"})
+		}
+	}
+}
+END_FILE:internal/usecase/calls/usecase.go
+# path: internal/adapters/http/organisation/handler.go | lang: go | tokens: 631 | size: 2524
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/organisation/handler.go
+package organisation
+
+import (
+	"errors"
+	"net/http"
+	domain "server/internal/domain/organisation"
+	usecase "server/internal/usecase/organisation"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+)
+
+// Handler exposes HTTP handlers for organisation operations.
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) RegisterOrganisation(c *gin.Context) {
+	var org domain.Entity
+	if err := c.BindJSON(&org); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	ownerUserID := userIDVal.(uint)
+
+	employee, err := h.uc.Register(c.Request.Context(), &org, ownerUserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create organisation"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "Organisation created successfully", "organisation": org, "employee": employee})
+}
+
+func (h *Handler) GetOrganisation(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+		return
+	}
+
+	org, err := h.uc.Get(c.Request.Context(), uint(id))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Organisation not found"})
+			return
+		}
+		if errors.Is(err, usecase.ErrInvalidID) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch organisation"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"organisation": org})
+}
+
+func (h *Handler) UpdateOrganisation(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+		return
+	}
+
+	var org domain.Entity
+	if err := c.BindJSON(&org); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	org.ID = uint(id)
+
+	if err := h.uc.Update(c.Request.Context(), &org); err != nil {
+		if errors.Is(err, usecase.ErrInvalidID) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update organisation"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"organisation": org})
+}
+END_FILE:internal/adapters/http/organisation/handler.go
+# path: internal/platform/database/models/organisation_model.go | lang: go | tokens: 628 | size: 2515
+BEGIN_FILE:internal/platform/database/models/organisation_model.go
+package models
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// Company represents an organization in the system.
+type Organisation struct {
+	gorm.Model                    // Unique identifier
+	CompanyName        string     `gorm:"type:varchar(255);not null" json:"company_name"`         // Organization name
+	CompanyCode        string     `gorm:"type:varchar(50);unique;not null" json:"company_code"`   // Unique company code (e.g., for subdomain)
+	PrimaryContactName string     `gorm:"type:varchar(100)" json:"primary_contact_name"`          // Primary point of contact
+	PrimaryEmail       string     `gorm:"type:varchar(255);unique;not null" json:"primary_email"` // Contact email
+	PhoneNumber        string     `gorm:"type:varchar(20)" json:"phone_number"`                   // Contact phone number
+	OfficeAddress      string     `gorm:"type:text" json:"office_address"`                        // Address information
+	City               string     `gorm:"type:varchar(100)" json:"city"`                          // City
+	State              string     `gorm:"type:varchar(100)" json:"state"`                         // State
+	PostalCode         string     `gorm:"type:varchar(20)" json:"postal_code"`                    // Postal code
+	Country            string     `gorm:"type:varchar(100)" json:"country"`                       // Country
+	PlanID             uint       `gorm:"index" json:"plan_id"`                                   // Foreign key to Subscription Plan table
+	PlanStartDate      time.Time `gorm:"type:date" json:"plan_start_date"`                       // Subscription start date
+	PlanEndDate        time.Time `gorm:"type:date" json:"plan_end_date"`                         // Subscription end date
+	PlanStatus         string     `gorm:"type:varchar(20);default:'active'" json:"plan_status"`   // Subscription status
+	MaxEmployees       int        `gorm:"type:int;default:0" json:"max_employees"`                // Max employees allowed
+	CompanyLogo        int        `gorm:"type:int" json:"company_logo"`                           // URL for company logo
+	Industry           string     `gorm:"type:varchar(100)" json:"industry"`                      // Industry type
+	BillingAddress     string     `gorm:"type:text" json:"billing_address"`                       // Billing address
+	CompanySize        string     `gorm:"type:varchar(50)" json:"company_size"`
+	BossID             uint       `gorm:"column:boss_id;index;foreignKey:UserID;references:ID" json:"boss_id"`
+}
+END_FILE:internal/platform/database/models/organisation_model.go
+# path: internal/adapters/repository/auth/gorm_repository.go | lang: go | tokens: 585 | size: 2342
+# functions: NewGormRepository, toModel, toDomain
+BEGIN_FILE:internal/adapters/repository/auth/gorm_repository.go
+package auth
+
+import (
+	"context"
+	domain "server/internal/domain/auth"
+	"server/internal/platform/database/models"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, user *domain.User) error {
+	model := toModel(user)
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	user.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
+	var model models.UserModel
+	if err := r.db.WithContext(ctx).Where("email = ?", email).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) GetByPhoneNumber(ctx context.Context, phone string) (*domain.User, error) {
+	var model models.UserModel
+	if err := r.db.WithContext(ctx).Where("phone_number = ?", phone).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.User, error) {
+	var model models.UserModel
+	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, user *domain.User) error {
+	model := toModel(user)
+	return r.db.WithContext(ctx).Save(model).Error
+}
+
+func toModel(u *domain.User) *models.UserModel {
+	model := &models.UserModel{
+		FirstName:      u.FirstName,
+		LastName:       u.LastName,
+		Email:          u.Email,
+		PhoneNumber:    u.PhoneNumber,
+		IsVerified:     u.IsVerified,
+		HashedPassword: u.HashedPassword,
+		ProfilePic:     u.ProfilePic,
+		City:           u.City,
+		Country:        u.Country,
+		DateOfBirth:    u.DateOfBirth,
+		LastLoginAt:    u.LastLoginAt,
+	}
+	model.ID = u.ID
+	return model
+}
+
+func toDomain(m *models.UserModel) *domain.User {
+	return &domain.User{
+		ID:             m.ID,
+		FirstName:      m.FirstName,
+		LastName:       m.LastName,
+		Email:          m.Email,
+		PhoneNumber:    m.PhoneNumber,
+		IsVerified:     m.IsVerified,
+		HashedPassword: m.HashedPassword,
+		ProfilePic:     m.ProfilePic,
+		City:           m.City,
+		Country:        m.Country,
+		DateOfBirth:    m.DateOfBirth,
+		LastLoginAt:    m.LastLoginAt,
+	}
+}
+END_FILE:internal/adapters/repository/auth/gorm_repository.go
+# path: internal/adapters/http/callstate/handler.go | lang: go | tokens: 583 | size: 2334
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/callstate/handler.go
+package callstate
+
+import (
+	"net/http"
+	domain "server/internal/domain/callstate"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct{ uc domain.UseCase }
+
+func NewHandler(uc domain.UseCase) *Handler { return &Handler{uc: uc} }
+
+func (h *Handler) Upsert(c *gin.Context) {
+	var state domain.State
+	if err := c.BindJSON(&state); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if err := h.uc.CreateOrUpdate(c.Request.Context(), &state); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save call state", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"call": state})
+}
+
+func (h *Handler) Get(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
+		return
+	}
+	state, err := h.uc.Get(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Call state not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"call": state})
+}
+
+func (h *Handler) Offer(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
+		return
+	}
+	var req struct {
+		CallingID        string `json:"calling_id"`
+		CallingFirstName string `json:"calling_first_name"`
+		CallingLastName  string `json:"calling_last_name"`
+		Offer            string `json:"offer"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if err := h.uc.CreateOffer(c.Request.Context(), uint(id), req.CallingID, req.CallingFirstName, req.CallingLastName, req.Offer); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create offer", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "offer updated"})
+}
+
+func (h *Handler) End(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
+		return
+	}
+	if err := h.uc.EndCall(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to end call", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "call ended"})
+}
+END_FILE:internal/adapters/http/callstate/handler.go
+# path: public/app.js | lang: javascript | tokens: 549 | size: 2196
+# functions: startWebRTC
+BEGIN_FILE:public/app.js
+const signalingServer = new WebSocket("ws://localhost:8000/api/v1/call/2"); // Room ID: 1
+
+let localStream;
+let remoteStream = new MediaStream();
+let peerConnection;
+const configuration = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+};
+  
+// Initialize WebRTC
+async function startWebRTC() {
+  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  localVideo.srcObject = localStream;
+
+  peerConnection = new RTCPeerConnection(configuration);
+
+  // Add local tracks to the connection
+  localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
+
+  // Handle remote tracks
+  peerConnection.ontrack = (event) => {
+    remoteStream.addTrack(event.track);
+    remoteVideo.srcObject = remoteStream;
+    
+  };
+
+  // Handle ICE candidates
+  peerConnection.onicecandidate = (event) => {
+    if (event.candidate) {
+      signalingServer.send(JSON.stringify({ type: "candidate", candidate: event.candidate }));
+    }
+  };
+
+  signalingServer.onmessage = async (event) => {
+    const message = JSON.parse(event.data);
+
+    switch (message.type) {
+      case "offer":
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        signalingServer.send(JSON.stringify({ type: "answer", answer }));
+        break;
+
+      case "answer":
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+        break;
+
+      case "candidate":
+        if (message.candidate) {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+        }
+        break;
+
+      default:
+        console.error("Unknown message type:", message.type);
+    }
+  };
+
+  // Create an offer if you are the first participant
+  const offer = await peerConnection.createOffer();
+  await peerConnection.setLocalDescription(offer);
+  signalingServer.send(JSON.stringify({ type: "offer", offer }));
+}
+
+// Start the WebRTC process
+startCall.addEventListener("click", startWebRTC);
+END_FILE:public/app.js
+# path: internal/adapters/repository/callstate/gorm_repository.go | lang: go | tokens: 525 | size: 2100
+# functions: NewGormRepository
+BEGIN_FILE:internal/adapters/repository/callstate/gorm_repository.go
+package callstate
+
+import (
+	"context"
+	domain "server/internal/domain/callstate"
+	"server/internal/platform/database/models"
+	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+type GormRepository struct{ db *gorm.DB }
+
+func NewGormRepository(db *gorm.DB) *GormRepository { return &GormRepository{db: db} }
+
+func (r *GormRepository) CreateOrUpdate(ctx context.Context, state *domain.State) error {
+	m := models.CallState{ID: state.ID, FirstName: state.FirstName, LastName: state.LastName, Email: state.Email, OrganisationID: state.OrganisationID, InCall: state.InCall, LastCall: state.LastCall, CallingID: state.CallingID, CallingFirstName: state.CallingFirstName, CallingLastName: state.CallingLastName, Offer: state.Offer}
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&m).Error
+}
+
+func (r *GormRepository) GetByID(ctx context.Context, id uint) (*domain.State, error) {
+	var row models.CallState
+	if err := r.db.WithContext(ctx).First(&row, id).Error; err != nil {
+		return nil, err
+	}
+	return &domain.State{ID: row.ID, FirstName: row.FirstName, LastName: row.LastName, Email: row.Email, OrganisationID: row.OrganisationID, InCall: row.InCall, LastCall: row.LastCall, CallingID: row.CallingID, CallingFirstName: row.CallingFirstName, CallingLastName: row.CallingLastName, Offer: row.Offer}, nil
+}
+
+func (r *GormRepository) UpdateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error {
+	now := time.Now().UTC()
+	updates := map[string]any{"calling_id": callingID, "calling_first_name": firstName, "calling_last_name": lastName, "offer": offer, "in_call": true, "last_call": &now}
+	return r.db.WithContext(ctx).Model(&models.CallState{}).Where("id = ?", id).Updates(updates).Error
+}
+
+func (r *GormRepository) EndCall(ctx context.Context, id uint) error {
+	now := time.Now().UTC()
+	updates := map[string]any{"calling_id": nil, "calling_first_name": nil, "calling_last_name": nil, "offer": nil, "in_call": false, "last_call": &now}
+	return r.db.WithContext(ctx).Model(&models.CallState{}).Where("id = ?", id).Updates(updates).Error
+}
+END_FILE:internal/adapters/repository/callstate/gorm_repository.go
+# path: internal/adapters/repository/chats/gorm_repository.go | lang: go | tokens: 516 | size: 2064
+# functions: NewGormRepository
+BEGIN_FILE:internal/adapters/repository/chats/gorm_repository.go
+package chats
+
+import (
+	"context"
+	domain "server/internal/domain/chats"
+	"server/internal/platform/database/models"
+	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+type GormRepository struct{ db *gorm.DB }
+
+func NewGormRepository(db *gorm.DB) *GormRepository { return &GormRepository{db: db} }
+
+func (r *GormRepository) Create(ctx context.Context, chat *domain.Chat) error {
+	m := models.Chat{ID: chat.ID, FirstName: chat.FirstName, LastName: chat.LastName, Email: chat.Email, OrganisationID: chat.OrganisationID, LastMessage: chat.LastMessage, LastMessageTimestamp: chat.LastMessageTimestamp, NumberOfMessage: chat.NumberOfMessage}
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&m).Error
+}
+
+func (r *GormRepository) ListByOrganisation(ctx context.Context, organisationID uint) ([]domain.Chat, error) {
+	var rows []models.Chat
+	if err := r.db.WithContext(ctx).Where("organisation_id = ?", organisationID).Order("last_message_timestamp desc nulls last").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]domain.Chat, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, domain.Chat{ID: row.ID, FirstName: row.FirstName, LastName: row.LastName, Email: row.Email, OrganisationID: row.OrganisationID, LastMessage: row.LastMessage, LastMessageTimestamp: row.LastMessageTimestamp, NumberOfMessage: row.NumberOfMessage})
+	}
+	return out, nil
+}
+
+func (r *GormRepository) UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error {
+	var ts *time.Time
+	if at != nil && *at != "" {
+		parsed, err := time.Parse(time.RFC3339, *at)
+		if err == nil {
+			ts = &parsed
+		}
+	}
+	updates := map[string]any{"last_message": message, "last_message_timestamp": ts}
+	return r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", id).Updates(updates).Error
+}
+
+func (r *GormRepository) IncrementMessageCount(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", id).UpdateColumn("number_of_message", gorm.Expr("number_of_message + 1")).Error
+}
+END_FILE:internal/adapters/repository/chats/gorm_repository.go
+# path: internal/platform/database/init.go | lang: go | tokens: 470 | size: 1883
+# functions: Init, initDB, PerformMigrations
+BEGIN_FILE:internal/platform/database/init.go
+package database
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"server/internal/platform/database/models"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+var DB *gorm.DB
+
+func Init() {
+	DB = initDB()
+}
+
+func initDB() *gorm.DB {
+	host := os.Getenv("DB_HOST")
+	user := os.Getenv("DB_USER")
+	password := os.Getenv("DB_PASSWORD")
+	dbname := os.Getenv("DB_NAME")
+	port := os.Getenv("DB_PORT")
+
+	if host == "" || user == "" || password == "" || dbname == "" || port == "" {
+		log.Fatalf("Database configuration missing. Please check environment variables.")
+	}
+
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s", host, user, password, dbname, port)
+
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		panic("failed to connect database")
+	}
+	return db
+}
+
+func PerformMigrations() error {
+	if err := DB.AutoMigrate(&models.Organisation{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.UserModel{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.Task{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.File{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.Employee{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.Attendance{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.Project{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.Team{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.TeamMember{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.Notification{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.Chat{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.ChatMessage{}); err != nil {
+		return err
+	}
+	if err := DB.AutoMigrate(&models.CallState{}); err != nil {
+		return err
+	}
+	return nil
+}
+END_FILE:internal/platform/database/init.go
+# path: internal/platform/database/models/chat_models.go | lang: go | tokens: 467 | size: 1870
+# imports: time
+BEGIN_FILE:internal/platform/database/models/chat_models.go
+package models
+
+import "time"
+
+type Chat struct {
+	ID                   uint       `gorm:"primaryKey;autoIncrement:false" json:"id"`
+	FirstName            string     `gorm:"size:100;not null" json:"first_name"`
+	LastName             string     `gorm:"size:100" json:"last_name"`
+	Email                string     `gorm:"size:255" json:"email"`
+	OrganisationID       uint       `gorm:"index;not null" json:"organisation_id"`
+	LastMessage          string     `gorm:"type:text" json:"last_message"`
+	LastMessageTimestamp *time.Time `json:"last_message_timestamp"`
+	NumberOfMessage      int        `gorm:"default:0" json:"number_of_message"`
+}
+
+type ChatMessage struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	RoomID     string    `gorm:"size:255;index;not null" json:"room_id"`
+	SenderID   string    `gorm:"size:50;index;not null" json:"sender_id"`
+	ReceiverID string    `gorm:"size:50;index;not null" json:"receiver_id"`
+	Message    string    `gorm:"type:text;not null" json:"message"`
+	IsSeen     bool      `gorm:"default:false" json:"is_seen"`
+	TimeStamp  time.Time `gorm:"index" json:"time_stamp"`
+}
+
+type CallState struct {
+	ID               uint       `gorm:"primaryKey;autoIncrement:false" json:"id"`
+	FirstName        string     `gorm:"size:100" json:"first_name"`
+	LastName         string     `gorm:"size:100" json:"last_name"`
+	Email            string     `gorm:"size:255" json:"email"`
+	OrganisationID   uint       `gorm:"index;not null" json:"organisation_id"`
+	InCall           bool       `gorm:"default:false" json:"in_call"`
+	LastCall         *time.Time `json:"last_call"`
+	CallingID        *string    `gorm:"size:50" json:"calling_id"`
+	CallingFirstName *string    `gorm:"size:100" json:"calling_first_name"`
+	CallingLastName  *string    `gorm:"size:100" json:"calling_last_name"`
+	Offer            *string    `gorm:"type:text" json:"offer"`
+}
+END_FILE:internal/platform/database/models/chat_models.go
+# path: internal/adapters/http/attendance/handler.go | lang: go | tokens: 465 | size: 1860
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/attendance/handler.go
+package attendance
+
+import (
+	"net/http"
+	domain "server/internal/domain/attendance"
+	"strconv"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) PostAttendance(c *gin.Context) {
+	var att domain.Attendance
+	if err := c.ShouldBindJSON(&att); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.uc.RecordAttendance(c.Request.Context(), &att); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attendance"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Attendance recorded successfully", "attendance": att})
+}
+
+func (h *Handler) UpdateAttendance(c *gin.Context) {
+	var req struct {
+		UserID        uint       `json:"user_id"`
+		CheckOutTime  *time.Time `json:"check_out_time"`
+		CheckOutPhoto int        `json:"check_out_photo"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	att, err := h.uc.UpdateAttendance(c.Request.Context(), req.UserID, req.CheckOutTime, req.CheckOutPhoto)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Attendance updated successfully", "attendance": att})
+}
+
+func (h *Handler) GetAttendanceByDateAndUser(c *gin.Context) {
+	userID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID is required"})
+		return
+	}
+
+	att, err := h.uc.GetAttendanceByDateAndUser(c.Request.Context(), uint(userID), time.Now())
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Attendance not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Attendance fetched successfully", "attendance": att})
+}
+END_FILE:internal/adapters/http/attendance/handler.go
+# path: internal/domain/organisation/entity.go | lang: go | tokens: 396 | size: 1584
+# imports: time
+BEGIN_FILE:internal/domain/organisation/entity.go
+package organisation
+
+import "time"
+
+// Entity is the core business representation of an organisation.
+type Entity struct {
+	ID                 uint      `json:"id"`
+	CompanyName        string    `json:"company_name"`
+	CompanyCode        string    `json:"company_code"`
+	PrimaryContactName string    `json:"primary_contact_name"`
+	PrimaryEmail       string    `json:"primary_email"`
+	PhoneNumber        string    `json:"phone_number"`
+	OfficeAddress      string    `json:"office_address"`
+	City               string    `json:"city"`
+	State              string    `json:"state"`
+	PostalCode         string    `json:"postal_code"`
+	Country            string    `json:"country"`
+	PlanID             uint      `json:"plan_id"`
+	PlanStartDate      time.Time `json:"plan_start_date"`
+	PlanEndDate        time.Time `json:"plan_end_date"`
+	PlanStatus         string    `json:"plan_status"`
+	MaxEmployees       int       `json:"max_employees"`
+	CompanyLogo        int       `json:"company_logo"`
+	Industry           string    `json:"industry"`
+	BillingAddress     string    `json:"billing_address"`
+	CompanySize        string    `json:"company_size"`
+	BossID             uint      `json:"boss_id"`
+}
+
+// OwnerEmployeeRow is the employee row created alongside organisation registration.
+type OwnerEmployeeRow struct {
+	UserID         uint      `json:"user_id"`
+	EmploymentID   int       `json:"employment_id"`
+	OrganisationID uint      `json:"organisation_id"`
+	Type           string    `json:"type"`
+	Salary         string    `json:"salary"`
+	LastLoginAt    time.Time `json:"last_login_at"`
+}
+END_FILE:internal/domain/organisation/entity.go
+# path: internal/usecase/teams/usecase.go | lang: go | tokens: 390 | size: 1563
+# functions: NewService
+BEGIN_FILE:internal/usecase/teams/usecase.go
+package teams
+
+import (
+	"context"
+	domain "server/internal/domain/teams"
+)
+
+type service struct {
+	repo domain.Repository
+}
+
+func NewService(repo domain.Repository) domain.UseCase {
+	return &service{repo: repo}
+}
+
+func (s *service) CreateTeam(ctx context.Context, team *domain.Team, members []uint) error {
+	team.IsActive = true
+	if err := s.repo.Create(ctx, team); err != nil {
+		return err
+	}
+
+	for _, memberID := range members {
+		var role string
+		if team.TeamLead == memberID {
+			role = "Team Lead"
+		} else {
+			role = "Member"
+		}
+		member := &domain.TeamMember{
+			UserID:   memberID,
+			TeamID:   team.ID,
+			Role:     role,
+			IsActive: true,
+			IsLeader: team.TeamLead == memberID,
+		}
+		if err := s.repo.CreateMember(ctx, member); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *service) GetTeam(ctx context.Context, id uint) (*domain.Team, []domain.TeamMember, error) {
+	team, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	members, err := s.repo.GetMembersByTeam(ctx, id)
+	if err != nil {
+		return team, nil, err
+	}
+	return team, members, nil
+}
+
+func (s *service) UpdateTeam(ctx context.Context, team *domain.Team) error {
+	return s.repo.Update(ctx, team)
+}
+
+func (s *service) DeleteTeam(ctx context.Context, id uint) error {
+	return s.repo.Delete(ctx, id)
+}
+
+func (s *service) GetTeamsByOrganisation(ctx context.Context, orgID uint) ([]domain.Team, error) {
+	return s.repo.GetByOrganisation(ctx, orgID)
+}
+
+func (s *service) GetTeams(ctx context.Context) ([]domain.Team, error) {
+	return s.repo.GetAll(ctx)
+}
+END_FILE:internal/usecase/teams/usecase.go
+# path: internal/usecase/tasks/usecase.go | lang: go | tokens: 384 | size: 1539
+# functions: NewService
+BEGIN_FILE:internal/usecase/tasks/usecase.go
+package tasks
+
+import (
+	"context"
+	domain "server/internal/domain/tasks"
+)
+
+type service struct {
+	repo domain.Repository
+}
+
+func NewService(repo domain.Repository) domain.UseCase {
+	return &service{repo: repo}
+}
+
+func (s *service) CreateTask(ctx context.Context, task *domain.Task) error {
+	return s.repo.Create(ctx, task)
+}
+
+func (s *service) UpdateTask(ctx context.Context, task *domain.Task) (*domain.Task, error) {
+	if err := s.repo.Update(ctx, task); err != nil {
+		return nil, err
+	}
+	return s.repo.GetByID(ctx, task.ID)
+}
+
+func (s *service) DeleteTask(ctx context.Context, id uint) error {
+	return s.repo.Delete(ctx, id)
+}
+
+func (s *service) GetTask(ctx context.Context, id uint) (*domain.Task, error) {
+	return s.repo.GetByID(ctx, id)
+}
+
+func (s *service) GetTeamTasks(ctx context.Context, userID uint) ([]domain.Task, error) {
+	return s.repo.GetByTeam(ctx, userID)
+}
+
+func (s *service) GetProjectTasks(ctx context.Context, projectID uint, page int) ([]domain.Task, error) {
+	return s.repo.GetByProject(ctx, projectID, page)
+}
+
+func (s *service) GetPersonalTasks(ctx context.Context, userID uint, page, pageSize int) ([]domain.Task, int64, error) {
+	return s.repo.GetPersonal(ctx, userID, page, pageSize)
+}
+
+func (s *service) GetOrganisationTasks(ctx context.Context, orgID uint, page, pageSize int) ([]domain.Task, int64, error) {
+	return s.repo.GetByOrganisation(ctx, orgID, page, pageSize)
+}
+
+func (s *service) GetTaskByTitle(ctx context.Context, title string) ([]domain.Task, error) {
+	return s.repo.GetByTitle(ctx, title)
+}
+END_FILE:internal/usecase/tasks/usecase.go
+# path: internal/platform/database/models/team_model.go | lang: go | tokens: 375 | size: 1501
+BEGIN_FILE:internal/platform/database/models/team_model.go
+package models
+
+import (
+	"gorm.io/gorm"
+)
+
+type Team struct {
+	gorm.Model
+	Name           string       `gorm:"type:varchar(255);not null" json:"name"`
+	Description    string       `gorm:"type:text" json:"description"`
+	OrganisationID uint         `gorm:"index" json:"organisation_id"`
+	Organisation   Organisation `gorm:"foreignKey:OrganisationID" json:"organisation"`
+	CreatedBy      uint         `gorm:"index" json:"created_by"`
+	TeamLead       uint         `gorm:"index" json:"team_lead"`
+	TeamLeadUser   UserModel    `gorm:"foreignKey:TeamLead" json:"team_lead_user"`
+	CreatedByUser  UserModel    `gorm:"foreignKey:CreatedBy" json:"created_by_user"`
+	IsActive       bool         `gorm:"default:true" json:"is_active"`
+}
+
+type TeamMember struct {
+	gorm.Model
+	UserID     uint      `gorm:"index;not null;user_id" json:"user_id"`
+	TeamID     uint      `gorm:"index" json:"team_id"`
+	User       UserModel `gorm:"foreignKey:UserID;references:ID" json:"user"`
+	Team       Team      `gorm:"foreignKey:TeamID;references:ID" json:"team"`
+	Role       string    `gorm:"type:varchar(100)" json:"role"`
+	IsActive   bool      `gorm:"default:true" json:"is_active"`
+	IsLeader   bool      `gorm:"default:false" json:"is_leader"`
+	IsAdmin    bool      `gorm:"default:false" json:"is_admin"`
+	IsManager  bool      `gorm:"default:false" json:"is_manager"`
+	IsEmployee bool      `gorm:"default:false" json:"is_employee"`
+	IsBoss     bool      `gorm:"default:false" json:"is_boss"`
+}
+END_FILE:internal/platform/database/models/team_model.go
+# path: internal/adapters/http/files/handler.go | lang: go | tokens: 365 | size: 1463
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/files/handler.go
+package files
+
+import (
+	"io"
+	"net/http"
+	domain "server/internal/domain/files"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) UploadFile(c *gin.Context) {
+	file, _, err := c.Request.FormFile("data")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer file.Close()
+
+	imageData, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	fileDomain := &domain.File{
+		FileName: c.PostForm("file_name"),
+		FileType: c.PostForm("file_type"),
+		FileSize: int64(len(imageData)),
+		Data:     imageData,
+	}
+
+	if err := h.uc.UploadFile(c.Request.Context(), fileDomain); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "file_id": fileDomain.ID})
+}
+
+func (h *Handler) GetFile(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+		return
+	}
+
+	file, err := h.uc.GetFile(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	c.Header("Content-Type", file.FileType)
+	c.Data(http.StatusOK, file.FileType, file.Data)
+}
+END_FILE:internal/adapters/http/files/handler.go
+# path: internal/adapters/repository/messages/gorm_repository.go | lang: go | tokens: 358 | size: 1435
+# functions: NewGormRepository
+BEGIN_FILE:internal/adapters/repository/messages/gorm_repository.go
+package messages
+
+import (
+	"context"
+	domain "server/internal/domain/messages"
+	"server/internal/platform/database/models"
+
+	"gorm.io/gorm"
+)
+
+type GormRepository struct{ db *gorm.DB }
+
+func NewGormRepository(db *gorm.DB) *GormRepository { return &GormRepository{db: db} }
+
+func (r *GormRepository) Create(ctx context.Context, msg *domain.Message) error {
+	m := models.ChatMessage{RoomID: msg.RoomID, SenderID: msg.SenderID, ReceiverID: msg.ReceiverID, Message: msg.Message, IsSeen: msg.IsSeen, TimeStamp: msg.TimeStamp}
+	if err := r.db.WithContext(ctx).Create(&m).Error; err != nil {
+		return err
+	}
+	msg.ID = m.ID
+	return nil
+}
+
+func (r *GormRepository) ListByRoom(ctx context.Context, roomID string) ([]domain.Message, error) {
+	var rows []models.ChatMessage
+	if err := r.db.WithContext(ctx).Where("room_id = ?", roomID).Order("time_stamp asc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]domain.Message, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, domain.Message{ID: row.ID, RoomID: row.RoomID, SenderID: row.SenderID, ReceiverID: row.ReceiverID, Message: row.Message, IsSeen: row.IsSeen, TimeStamp: row.TimeStamp})
+	}
+	return out, nil
+}
+
+func (r *GormRepository) MarkSeen(ctx context.Context, roomID string, receiverID string) error {
+	return r.db.WithContext(ctx).Model(&models.ChatMessage{}).Where("room_id = ? AND receiver_id = ?", roomID, receiverID).Update("is_seen", true).Error
+}
+END_FILE:internal/adapters/repository/messages/gorm_repository.go
+# path: internal/domain/employees/entity.go | lang: go | tokens: 357 | size: 1430
+BEGIN_FILE:internal/domain/employees/entity.go
+package employees
+
+import (
+	"time"
+	authDomain "server/internal/domain/auth"
+	orgDomain "server/internal/domain/organisation"
+)
+
+type Employee struct {
+	UserID         uint                   `json:"user_id"`
+	User           authDomain.User        `json:"user"`
+	EmploymentID   int                    `json:"employment_id"`
+	OrganisationID uint                   `json:"organisation_id"`
+	Organisation   orgDomain.Entity       `json:"organisation"`
+	Type           string                 `json:"type"`
+	Salary         string                 `json:"salary"`
+	LastLoginAt    time.Time              `json:"last_login_at"`
+}
+
+type Manager struct {
+	UserID         uint                   `json:"user_id"`
+	User           authDomain.User        `json:"user"`
+	EmploymentID   int                    `json:"employment_id"`
+	OrganisationID uint                   `json:"organisation_id"`
+	Organisation   orgDomain.Entity       `json:"organisation"`
+	Type           string                 `json:"type"`
+	Salary         string                 `json:"salary"`
+	LastLoginAt    time.Time              `json:"last_login_at"`
+}
+
+type Boss struct {
+	UserID         uint                   `json:"user_id"`
+	User           authDomain.User        `json:"user"`
+	OrganisationID uint                   `json:"organisation_id"`
+	Organisation   orgDomain.Entity       `json:"organisation"`
+	LastLoginAt    time.Time              `json:"last_login_at"`
+}
+END_FILE:internal/domain/employees/entity.go
+# path: internal/adapters/http/messages/handler.go | lang: go | tokens: 355 | size: 1423
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/messages/handler.go
+package messages
+
+import (
+	"net/http"
+	domain "server/internal/domain/messages"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct{ uc domain.UseCase }
+
+func NewHandler(uc domain.UseCase) *Handler { return &Handler{uc: uc} }
+
+func (h *Handler) GetMessages(c *gin.Context) {
+	peerID := c.Param("peer_id")
+	userIDVal, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	msgs, err := h.uc.GetMessages(c.Request.Context(), userIDVal.(uint), peerID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"messages": msgs})
+}
+
+func (h *Handler) SendMessage(c *gin.Context) {
+	var msg domain.Message
+	if err := c.BindJSON(&msg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if _, err := strconv.Atoi(msg.SenderID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "sender_id must be numeric"})
+		return
+	}
+	if _, err := strconv.Atoi(msg.ReceiverID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "receiver_id must be numeric"})
+		return
+	}
+	if err := h.uc.SendMessage(c.Request.Context(), &msg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"message": msg})
+}
+END_FILE:internal/adapters/http/messages/handler.go
+# path: internal/usecase/messages/usecase.go | lang: go | tokens: 347 | size: 1390
+# functions: NewService, roomID
+BEGIN_FILE:internal/usecase/messages/usecase.go
+package messages
+
+import (
+	"context"
+	"errors"
+	chatDomain "server/internal/domain/chats"
+	domain "server/internal/domain/messages"
+	"sort"
+	"strconv"
+	"time"
+)
+
+var ErrInvalidUserID = errors.New("invalid user id")
+
+type service struct {
+	repo     domain.Repository
+	chatRepo chatDomain.Repository
+}
+
+func NewService(repo domain.Repository, chatRepo chatDomain.Repository) domain.UseCase {
+	return &service{repo: repo, chatRepo: chatRepo}
+}
+
+func roomID(a, b string) string {
+	ids := []string{a, b}
+	sort.Strings(ids)
+	return ids[0] + "-" + ids[1]
+}
+
+func (s *service) GetMessages(ctx context.Context, me uint, peerID string) ([]domain.Message, error) {
+	mine := strconv.FormatUint(uint64(me), 10)
+	r := roomID(peerID, mine)
+	_ = s.repo.MarkSeen(ctx, r, mine)
+	return s.repo.ListByRoom(ctx, r)
+}
+
+func (s *service) SendMessage(ctx context.Context, msg *domain.Message) error {
+	receiver, err := strconv.ParseUint(msg.ReceiverID, 10, 64)
+	if err != nil {
+		return ErrInvalidUserID
+	}
+
+	msg.RoomID = roomID(msg.ReceiverID, msg.SenderID)
+	if msg.TimeStamp.IsZero() {
+		msg.TimeStamp = time.Now().UTC()
+	}
+
+	if err := s.chatRepo.IncrementMessageCount(ctx, uint(receiver)); err != nil {
+		return err
+	}
+	ts := msg.TimeStamp.UTC().Format(time.RFC3339)
+	if err := s.chatRepo.UpdateLastMessage(ctx, uint(receiver), msg.Message, &ts); err != nil {
+		return err
+	}
+	return s.repo.Create(ctx, msg)
+}
+END_FILE:internal/usecase/messages/usecase.go
+# path: internal/usecase/attendance/usecase.go | lang: go | tokens: 347 | size: 1388
+# functions: NewService
+BEGIN_FILE:internal/usecase/attendance/usecase.go
+package attendance
+
+import (
+	"context"
+	domain "server/internal/domain/attendance"
+	"time"
+	"errors"
+)
+
+type service struct {
+	repo domain.Repository
+}
+
+func NewService(repo domain.Repository) domain.UseCase {
+	return &service{repo: repo}
+}
+
+func (s *service) RecordAttendance(ctx context.Context, att *domain.Attendance) error {
+	if att.Date.IsZero() {
+		att.Date = time.Now()
+	}
+	return s.repo.Create(ctx, att)
+}
+
+func (s *service) UpdateAttendance(ctx context.Context, userID uint, checkOutTime *time.Time, checkOutPhoto int) (*domain.Attendance, error) {
+	today := time.Now()
+	att, err := s.repo.GetByUserAndDate(ctx, userID, today)
+	if err != nil {
+		return nil, errors.New("PLEASE CHECK IN FIRST")
+	}
+
+	att.CheckOutTime = checkOutTime
+	att.CheckOutPhoto = checkOutPhoto
+
+	if err := s.repo.Update(ctx, att); err != nil {
+		return nil, err
+	}
+	return att, nil
+}
+
+func (s *service) GetAttendanceByUser(ctx context.Context, userID uint, offset int) ([]domain.Attendance, error) {
+	return s.repo.GetByUser(ctx, userID, offset)
+}
+
+func (s *service) GetAttendanceByOrganisation(ctx context.Context, orgID uint, offset int) ([]domain.Attendance, error) {
+	return s.repo.GetByOrganisation(ctx, orgID, offset)
+}
+
+func (s *service) GetAttendanceByDateAndUser(ctx context.Context, userID uint, date time.Time) (*domain.Attendance, error) {
+	return s.repo.GetByUserAndDate(ctx, userID, date)
+}
+END_FILE:internal/usecase/attendance/usecase.go
+# path: internal/domain/tasks/entity.go | lang: go | tokens: 335 | size: 1340
+BEGIN_FILE:internal/domain/tasks/entity.go
+package tasks
+
+import (
+	authDomain "server/internal/domain/auth"
+	orgDomain "server/internal/domain/organisation"
+	projectDomain "server/internal/domain/projects"
+	teamDomain "server/internal/domain/teams"
+	"time"
+)
+
+type Task struct {
+	ID             uint                   `json:"id"`
+	Title          string                 `json:"title"`
+	Description    string                 `json:"description"`
+	DueDate        time.Time              `json:"due_date"`
+	AssignedTo     uint                   `json:"assigned_to"`
+	AssignedUser   *authDomain.User       `json:"assigned_user"`
+	AssignedBy     uint                   `json:"assigned_by"`
+	AssignedByUser *authDomain.User       `json:"assigned_by_user"`
+	Type           string                 `json:"type"`
+	Priority       string                 `json:"priority"`
+	Status         string                 `json:"status"`
+	OrganisationID uint                   `json:"organisation_id"`
+	Organisation   *orgDomain.Entity      `json:"organisation"`
+	IsPersonal     bool                   `json:"is_personal"`
+	TeamID         *uint                  `json:"team_id"`
+	Team           *teamDomain.Team       `json:"team"`
+	ProjectID      *uint                  `json:"project_id"`
+	Project        *projectDomain.Project `json:"project"`
+	CreatedAt      time.Time              `json:"CreatedAt"`
+}
+END_FILE:internal/domain/tasks/entity.go
+# path: internal/platform/database/models/task_model.go | lang: go | tokens: 330 | size: 1322
+BEGIN_FILE:internal/platform/database/models/task_model.go
+package models
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type Task struct {
+	gorm.Model
+	Title          string        `gorm:"size:255;not null" json:"title"`
+	Description    string        `gorm:"type:text" json:"description"`
+	DueDate        time.Time     `json:"due_date"`
+	AssignedTo     uint          `json:"assigned_to"`
+	AssignedUser   *UserModel    `gorm:"foreignKey:AssignedTo;references:ID" json:"assigned_user"`
+	AssignedBy     uint          `json:"assigned_by"`
+	AssignedByUser *UserModel    `gorm:"foreignKey:AssignedBy;references:ID" json:"assigned_by_user"`
+	Type           string        `gorm:"size:100" json:"type"`
+	Priority       string        `gorm:"size:100" json:"priority"`
+	Status         string        `gorm:"size:50" json:"status"`
+	OrganisationID uint          `gorm:"index" json:"organisation_id"`
+	Organisation   *Organisation `gorm:"foreignKey:OrganisationID" json:"organisation"`
+	IsPersonal     bool          `gorm:"default:false" json:"is_personal"`
+	TeamID         *uint         `gorm:"index" json:"team_id"` // Pointer for nullable
+	Team           *Team         `gorm:"foreignKey:TeamID" json:"team"`
+	ProjectID      *uint         `gorm:"index" json:"project_id"` // Pointer for nullable
+	Project        *Project      `gorm:"foreignKey:ProjectID" json:"project"`
+}
+END_FILE:internal/platform/database/models/task_model.go
+# path: internal/platform/middlewares/auth_validator_middleware.go | lang: go | tokens: 324 | size: 1297
+# functions: ValidateToken
+BEGIN_FILE:internal/platform/middlewares/auth_validator_middleware.go
+package middlewares
+
+import (
+	"net/http"
+	"server/internal/platform/miscallenous" 
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+// ValidateToken is a middleware function that checks for a valid JWT token in the request header.
+// It decodes the token and verifies its validity before allowing the request to proceed.
+// If the token is invalid or missing, it responds with an "Unauthorized" error.
+func ValidateToken() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Extract the token from the Authorization header
+		token := c.GetHeader("Authorization")
+
+		// Attempt to decode and validate the token
+		decodedToken, err := miscallenous.DecodeJWTToken(token)
+
+		// If there's an error in decoding, respond with Unauthorized
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			c.Abort()
+			return
+		}
+
+		// If the token is valid, allow the request to proceed
+		if decodedToken.Valid {
+			if claims, ok := decodedToken.Claims.(jwt.MapClaims); ok {
+				if sub, ok := claims["sub"].(float64); ok {
+					c.Set("userID", uint(sub))
+				}
+			}
+			c.Next()
+			return
+		}
+
+		// If we reach here, the token was invalid
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.Abort()
+	}
+}
+END_FILE:internal/platform/middlewares/auth_validator_middleware.go
+# path: internal/platform/miscallenous/misc_functions.go | lang: go | tokens: 318 | size: 1275
+# functions: GenerateJWTToken, DecodeJWTToken, HashPassword, VerifyPassword
+BEGIN_FILE:internal/platform/miscallenous/misc_functions.go
+package miscallenous
+
+import (
+	"os"
+	"time"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// generateJWTToken creates a new JWT token for the given user.
+func GenerateJWTToken(object any,tokenName string,ID uint) (string, error) {
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		tokenName: object,
+			"sub": ID,
+		"exp":  time.Now().Add(time.Hour * 24 * 30).Unix(), // Expiration time (30 days from now)
+	}).SignedString([]byte(os.Getenv("SECRET")))
+}
+
+func DecodeJWTToken(tokenString string) (*jwt.Token, error) {
+	keyFunc := func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return []byte(os.Getenv("SECRET")), nil
+	}
+
+	return jwt.Parse(tokenString, keyFunc)
+}
+
+// hashPassword hashes the given password using bcrypt.
+func HashPassword(password string) (string, error) {
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hashedPassword), nil
+}
+
+
+func VerifyPassword(hashedPassword string, password string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)) == nil
+}
+END_FILE:internal/platform/miscallenous/misc_functions.go
+# path: internal/domain/teams/entity.go | lang: go | tokens: 306 | size: 1227
+BEGIN_FILE:internal/domain/teams/entity.go
+package teams
+
+import (
+	authDomain "server/internal/domain/auth"
+	orgDomain "server/internal/domain/organisation"
+)
+
+type Team struct {
+	ID             uint            `json:"id"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	OrganisationID uint            `json:"organisation_id"`
+	Organisation   orgDomain.Entity `json:"organisation"`
+	CreatedBy      uint            `json:"created_by"`
+	TeamLead       uint            `json:"team_lead"`
+	TeamLeadUser   authDomain.User `json:"team_lead_user"`
+	CreatedByUser  authDomain.User `json:"created_by_user"`
+	IsActive       bool            `json:"is_active"`
+}
+
+type TeamMember struct {
+	ID         uint            `json:"id"`
+	UserID     uint            `json:"user_id"`
+	TeamID     uint            `json:"team_id"`
+	User       authDomain.User `json:"user"`
+	Team       Team            `json:"team"`
+	Role       string          `json:"role"`
+	IsActive   bool            `json:"is_active"`
+	IsLeader   bool            `json:"is_leader"`
+	IsAdmin    bool            `json:"is_admin"`
+	IsManager  bool            `json:"is_manager"`
+	IsEmployee bool            `json:"is_employee"`
+	IsBoss     bool            `json:"is_boss"`
+}
+END_FILE:internal/domain/teams/entity.go
+# path: internal/usecase/projects/usecase.go | lang: go | tokens: 284 | size: 1136
+# functions: NewService
+BEGIN_FILE:internal/usecase/projects/usecase.go
+package projects
+
+import (
+	"context"
+	domain "server/internal/domain/projects"
+)
+
+type service struct {
+	repo domain.Repository
+}
+
+func NewService(repo domain.Repository) domain.UseCase {
+	return &service{repo: repo}
+}
+
+func (s *service) CreateProject(ctx context.Context, project *domain.Project) error {
+	return s.repo.Create(ctx, project)
+}
+
+func (s *service) GetProject(ctx context.Context, id uint) (*domain.Project, error) {
+	return s.repo.GetByID(ctx, id)
+}
+
+func (s *service) UpdateProject(ctx context.Context, project *domain.Project) error {
+	return s.repo.Update(ctx, project)
+}
+
+func (s *service) DeleteProject(ctx context.Context, id uint) error {
+	return s.repo.Delete(ctx, id)
+}
+
+func (s *service) GetProjectsByOrganisation(ctx context.Context, orgID uint) ([]domain.Project, error) {
+	return s.repo.GetByOrganisation(ctx, orgID)
+}
+
+func (s *service) GetProjectsByTeam(ctx context.Context, teamID uint) ([]domain.Project, error) {
+	return s.repo.GetByTeam(ctx, teamID)
+}
+
+func (s *service) GetProjectsWithLessData(ctx context.Context, orgID uint) ([]domain.Project, error) {
+	return s.repo.GetWithLessData(ctx, orgID)
+}
+END_FILE:internal/usecase/projects/usecase.go
+# path: internal/adapters/http/chats/handler.go | lang: go | tokens: 276 | size: 1105
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/chats/handler.go
+package chats
+
+import (
+	"net/http"
+	domain "server/internal/domain/chats"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct{ uc domain.UseCase }
+
+func NewHandler(uc domain.UseCase) *Handler { return &Handler{uc: uc} }
+
+func (h *Handler) Create(c *gin.Context) {
+	var chat domain.Chat
+	if err := c.BindJSON(&chat); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if err := h.uc.CreateChat(c.Request.Context(), &chat); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create chat", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"chat": chat})
+}
+
+func (h *Handler) List(c *gin.Context) {
+	orgID, err := strconv.Atoi(c.Query("organisation_id"))
+	if err != nil || orgID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "organisation_id is required"})
+		return
+	}
+	chats, err := h.uc.GetChats(c.Request.Context(), uint(orgID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chats"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"chats": chats})
+}
+END_FILE:internal/adapters/http/chats/handler.go
+# path: internal/platform/database/models/attendance_model.go | lang: go | tokens: 270 | size: 1082
+BEGIN_FILE:internal/platform/database/models/attendance_model.go
+package models
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type Attendance struct {
+	gorm.Model
+	UserID         uint         `gorm:"column:user_id;not null;<-:create" json:"user_id"`
+	User           UserModel    `gorm:"foreignKey:UserID;references:ID" json:"-"` // Omitting from JSON response
+	Date           time.Time    `gorm:"column:date;type:DATE;default:CURRENT_DATE;not null;<-:create" json:"date"`
+	CheckInTime    *time.Time   `gorm:"column:check_in_time;<-:create" json:"check_in_time"` // Pointer to allow nulls
+	CheckOutTime   *time.Time   `gorm:"column:check_out_time" json:"check_out_time"`         // Updatable, no restriction
+	OrganisationID uint         `gorm:"column:organisation_id;not null;<-:create" json:"organisation_id"`
+	Organisation   Organisation `gorm:"foreignKey:OrganisationID;references:ID" json:"-"` // Omitting from JSON response
+	CheckInPhoto   int          `gorm:"column:check_in_photo;<-:create" json:"check_in_photo"`
+	CheckOutPhoto  int          `gorm:"column:check_out_photo" json:"check_out_photo"` // Updatable, no restriction
+}
+END_FILE:internal/platform/database/models/attendance_model.go
+# path: public/index.html | lang: html | tokens: 263 | size: 1053
+BEGIN_FILE:public/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC Video Call</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin: 0;
+      padding: 0;
+      background: #f4f4f4;
+    }
+    video {
+      width: 45%;
+      margin: 1%;
+      border: 2px solid #ccc;
+      border-radius: 10px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    }
+    #controls {
+      margin: 20px;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      border: none;
+      background: #007BFF;
+      color: white;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+  </style>
+</head>
+<body>
+    <video id="localVideo" autoplay playsinline muted></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+    <button id="startCall">Start Call</button>
+    <script src="app.js"></script>
+</body>
+</html>
+END_FILE:public/index.html
+# path: internal/domain/projects/entity.go | lang: go | tokens: 246 | size: 984
+BEGIN_FILE:internal/domain/projects/entity.go
+package projects
+
+import (
+	"time"
+	authDomain "server/internal/domain/auth"
+	orgDomain "server/internal/domain/organisation"
+	teamDomain "server/internal/domain/teams"
+)
+
+type Project struct {
+	ID               uint               `json:"id"`
+	Name             string             `json:"name"`
+	Description      string             `json:"description"`
+	StartDate        time.Time          `json:"start_date"`
+	EndDate          time.Time          `json:"end_date"`
+	OrganisationID   uint               `json:"organisation_id"`
+	Organisation     orgDomain.Entity    `json:"organisation"`
+	TeamID           uint               `json:"team_id"`
+	Team             teamDomain.Team    `json:"team"`
+	CreatedBy        uint               `json:"created_by"`
+	CreatedByUser    authDomain.User    `json:"created_by_user"`
+	Status           string             `json:"status"`
+	Priority         string             `json:"priority"`
+	CompletionStatus string             `json:"completion_status"`
+}
+END_FILE:internal/domain/projects/entity.go
+# path: internal/adapters/repository/files/gorm_repository.go | lang: go | tokens: 241 | size: 967
+# functions: NewGormRepository
+BEGIN_FILE:internal/adapters/repository/files/gorm_repository.go
+package files
+
+import (
+	"context"
+	domain "server/internal/domain/files"
+	"server/internal/platform/database/models"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, file *domain.File) error {
+	model := &models.File{
+		FileName: file.FileName,
+		Data:     file.Data,
+		FileType: file.FileType,
+		FileSize: file.FileSize,
+	}
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	file.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.File, error) {
+	var model models.File
+	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return &domain.File{
+		ID:       model.ID,
+		FileName: model.FileName,
+		Data:     model.Data,
+		FileType: model.FileType,
+		FileSize: model.FileSize,
+	}, nil
+}
+END_FILE:internal/adapters/repository/files/gorm_repository.go
+# path: internal/usecase/organisation/usecase.go | lang: go | tokens: 233 | size: 934
+# functions: NewService
+BEGIN_FILE:internal/usecase/organisation/usecase.go
+package organisation
+
+import (
+	"context"
+	"errors"
+	domain "server/internal/domain/organisation"
+)
+
+var ErrInvalidID = errors.New("invalid organisation id")
+
+// Service implements organisation application business rules.
+type Service struct {
+	repo domain.Repository
+}
+
+func NewService(repo domain.Repository) *Service {
+	return &Service{repo: repo}
+}
+
+func (s *Service) Register(ctx context.Context, org *domain.Entity, ownerUserID uint) (*domain.OwnerEmployeeRow, error) {
+	if ownerUserID == 0 {
+		return nil, ErrInvalidID
+	}
+	org.BossID = ownerUserID
+	return s.repo.CreateWithOwner(ctx, org, ownerUserID)
+}
+
+func (s *Service) Get(ctx context.Context, id uint) (*domain.Entity, error) {
+	if id == 0 {
+		return nil, ErrInvalidID
+	}
+	return s.repo.GetByID(ctx, id)
+}
+
+func (s *Service) Update(ctx context.Context, org *domain.Entity) error {
+	if org == nil || org.ID == 0 {
+		return ErrInvalidID
+	}
+	return s.repo.Update(ctx, org)
+}
+END_FILE:internal/usecase/organisation/usecase.go
+# path: internal/platform/database/models/project_model.go | lang: go | tokens: 213 | size: 852
+BEGIN_FILE:internal/platform/database/models/project_model.go
+package models
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type Project struct {
+	gorm.Model
+	Name             string
+	Description      string
+	StartDate        time.Time
+	EndDate          time.Time
+	OrganisationID   uint         `gorm:"index" json:"organisation_id"`
+	TeamID           uint         `gorm:"index" json:"team_id"`
+	Team             Team         `gorm:"foreignKey:TeamID" json:"team"`
+	CreatedBy        uint         `gorm:"index" json:"created_by"`
+	CreatedByUser    UserModel    `gorm:"foreignKey:CreatedBy" json:"created_by_user"`
+	Status           string       `gorm:"size:50" json:"status"`
+	Priority         string       `gorm:"size:50" json:"priority"`
+	CompletionStatus string       `gorm:"size:50" json:"completion_status"`
+	Organisation     Organisation `gorm:"foreignKey:OrganisationID" json:"organisation"`
+}
+END_FILE:internal/platform/database/models/project_model.go
+# path: internal/adapters/http/employees/routes.go | lang: go | tokens: 211 | size: 846
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/employees/routes.go
+package employees
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	employeeGroup := r.Group("/api/v1/employees")
+	employeeGroup.Use(validateToken)
+	{
+		employeeGroup.GET("/is-employee/:user_id", h.IsEmployee)
+		employeeGroup.POST("/add", h.AddEmployee)
+		employeeGroup.GET("/get/:organisation_id", h.GetEmployees)
+		employeeGroup.GET("/list/:id", h.GetEmployeeByID)
+		employeeGroup.PUT("/update/:id", h.UpdateEmployee)
+		employeeGroup.DELETE("/delete/:id", h.DeleteEmployee)
+		employeeGroup.GET("/search", h.SearchEmployee)
+		employeeGroup.POST("/make-manager", h.MakeManager)
+	}
+
+	{
+		r.POST("/api/v1/create/boss", validateToken, h.CreateBoss)
+		r.GET("/api/v1/get/boss", validateToken, h.GetBoss)
+		r.POST("/api/v1/create/employee", validateToken, h.CreateEmployee)
+	}
+}
+END_FILE:internal/adapters/http/employees/routes.go
+# path: cmd/server/main.go | lang: go | tokens: 200 | size: 800
+# functions: init, main
+BEGIN_FILE:cmd/server/main.go
+package main
+
+import (
+	"server/internal/platform/database"
+	"server/internal/app/routes"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+)
+
+func init() {
+	godotenv.Load()
+	database.Init()
+}
+
+func  main() {
+	// Perform database migrations
+	if err := database.PerformMigrations(); err != nil {
+		panic("Failed to perform database migrations: " + err.Error())
+	}
+	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length", "Authorization"},
+		AllowCredentials: true,
+	}))
+	routes.SetupRoutes(r)
+	r.Run(":8000")
+}
+END_FILE:cmd/server/main.go
+# path: internal/usecase/callstate/usecase.go | lang: go | tokens: 186 | size: 746
+# functions: NewService
+BEGIN_FILE:internal/usecase/callstate/usecase.go
+package callstate
+
+import (
+	"context"
+	domain "server/internal/domain/callstate"
+)
+
+type service struct{ repo domain.Repository }
+
+func NewService(repo domain.Repository) domain.UseCase { return &service{repo: repo} }
+
+func (s *service) CreateOrUpdate(ctx context.Context, state *domain.State) error {
+	return s.repo.CreateOrUpdate(ctx, state)
+}
+func (s *service) Get(ctx context.Context, id uint) (*domain.State, error) {
+	return s.repo.GetByID(ctx, id)
+}
+func (s *service) CreateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error {
+	return s.repo.UpdateOffer(ctx, id, callingID, firstName, lastName, offer)
+}
+func (s *service) EndCall(ctx context.Context, id uint) error { return s.repo.EndCall(ctx, id) }
+END_FILE:internal/usecase/callstate/usecase.go
+# path: internal/domain/employees/repository.go | lang: go | tokens: 182 | size: 731
+# imports: context
+BEGIN_FILE:internal/domain/employees/repository.go
+package employees
+
+import "context"
+
+type Repository interface {
+	GetByUserID(ctx context.Context, userID uint) (*Employee, error)
+	Create(ctx context.Context, employee *Employee) error
+	GetEmployeesByOrg(ctx context.Context, orgID uint) ([]Employee, error)
+	GetByID(ctx context.Context, id uint) (*Employee, error)
+	Update(ctx context.Context, employee *Employee) error
+	Delete(ctx context.Context, id uint) error
+	Search(ctx context.Context, query string) ([]Employee, error)
+
+	CreateManager(ctx context.Context, manager *Manager) error
+	GetManagerByUserID(ctx context.Context, userID uint) (*Manager, error)
+
+	CreateBoss(ctx context.Context, boss *Boss) error
+	GetBossByUserID(ctx context.Context, userID uint) (*Boss, error)
+}
+END_FILE:internal/domain/employees/repository.go
+# path: docker-compose.yml | lang: yaml | tokens: 181 | size: 727
+BEGIN_FILE:docker-compose.yml
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=8759
+      - DB_NAME=postgres
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy  # Wait until db is healthy
+
+  db:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=8759
+      - POSTGRES_DB=postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+END_FILE:docker-compose.yml
+# path: internal/domain/employees/usecase.go | lang: go | tokens: 173 | size: 692
+# imports: context
+BEGIN_FILE:internal/domain/employees/usecase.go
+package employees
+
+import "context"
+
+type UseCase interface {
+	AddEmployee(ctx context.Context, emp *Employee) error
+	GetEmployees(ctx context.Context, orgID uint) ([]Employee, error)
+	GetEmployee(ctx context.Context, id uint) (*Employee, error)
+	UpdateEmployee(ctx context.Context, emp *Employee) error
+	DeleteEmployee(ctx context.Context, id uint) error
+	SearchEmployees(ctx context.Context, query string) ([]Employee, error)
+	
+	MakeManager(ctx context.Context, manager *Manager) error
+	IsEmployeeOrManager(ctx context.Context, userID uint) (string, interface{}, string, error)
+
+	CreateBoss(ctx context.Context, boss *Boss) error
+	GetBoss(ctx context.Context, userID uint) (*Boss, error)
+}
+END_FILE:internal/domain/employees/usecase.go
+# path: internal/domain/tasks/usecase.go | lang: go | tokens: 169 | size: 677
+# imports: context
+BEGIN_FILE:internal/domain/tasks/usecase.go
+package tasks
+
+import "context"
+
+type UseCase interface {
+	CreateTask(ctx context.Context, task *Task) error
+	UpdateTask(ctx context.Context, task *Task) (*Task, error)
+	DeleteTask(ctx context.Context, id uint) error
+	GetTask(ctx context.Context, id uint) (*Task, error)
+	GetTeamTasks(ctx context.Context, userID uint) ([]Task, error)
+	GetProjectTasks(ctx context.Context, projectID uint, page int) ([]Task, error)
+	GetPersonalTasks(ctx context.Context, userID uint, page, pageSize int) ([]Task, int64, error)
+	GetOrganisationTasks(ctx context.Context, orgID uint, page, pageSize int) ([]Task, int64, error)
+	GetTaskByTitle(ctx context.Context, title string) ([]Task, error)
+}
+END_FILE:internal/domain/tasks/usecase.go
+# path: internal/adapters/http/tasks/routes.go | lang: go | tokens: 164 | size: 656
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/tasks/routes.go
+package tasks
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	taskGroup := r.Group("/api/v1/tasks")
+	taskGroup.Use(validateToken)
+	{
+		taskGroup.POST("/create", h.CreateTask)
+		taskGroup.PUT("/update/:id", h.UpdateTask)
+		taskGroup.DELETE("/delete/:id", h.SoftDeleteTask)
+		taskGroup.GET("/get/:id", h.GetTaskByID)
+		taskGroup.GET("/team", h.GetTeamTasks)
+		taskGroup.GET("/project", h.GetProjectTasks)
+		taskGroup.GET("/personal", h.GetPersonalTasks)
+		taskGroup.GET("/organisation/:organisation_id", h.GetOrganisationTasks)
+		taskGroup.GET("/title/:title", h.GetTaskByTitle)
+	}
+}
+END_FILE:internal/adapters/http/tasks/routes.go
+# path: internal/domain/tasks/repository.go | lang: go | tokens: 160 | size: 641
+# imports: context
+BEGIN_FILE:internal/domain/tasks/repository.go
+package tasks
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, task *Task) error
+	Update(ctx context.Context, task *Task) error
+	Delete(ctx context.Context, id uint) error
+	GetByID(ctx context.Context, id uint) (*Task, error)
+	GetByTeam(ctx context.Context, userID uint) ([]Task, error)
+	GetByProject(ctx context.Context, projectID uint, page int) ([]Task, error)
+	GetPersonal(ctx context.Context, userID uint, page, pageSize int) ([]Task, int64, error)
+	GetByOrganisation(ctx context.Context, orgID uint, page, pageSize int) ([]Task, int64, error)
+	GetByTitle(ctx context.Context, title string) ([]Task, error)
+}
+END_FILE:internal/domain/tasks/repository.go
+# path: internal/domain/auth/entity.go | lang: go | tokens: 157 | size: 628
+# imports: time
+BEGIN_FILE:internal/domain/auth/entity.go
+package auth
+
+import "time"
+
+// User represents a user entity in the domain.
+type User struct {
+	ID             uint      `json:"id"`
+	FirstName      string    `json:"first_name"`
+	LastName       string    `json:"last_name"`
+	Email          string    `json:"email"`
+	PhoneNumber    string    `json:"phone_number"`
+	IsVerified     bool      `json:"is_verified"`
+	HashedPassword string    `json:"-"`
+	ProfilePic     string    `json:"profile_pic"`
+	City           string    `json:"city"`
+	Country        string    `json:"country"`
+	DateOfBirth    time.Time `json:"date_of_birth"`
+	LastLoginAt    time.Time `json:"last_login_at"`
+}
+END_FILE:internal/domain/auth/entity.go
+# path: internal/adapters/http/calls/handler.go | lang: go | tokens: 155 | size: 621
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/calls/handler.go
+package calls
+
+import (
+	"log"
+	"net/http"
+	domain "server/internal/domain/calls"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+)
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) HandleRoom(c *gin.Context) {
+	roomID := c.Param("id")
+	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Println("Error upgrading connection:", err)
+		return
+	}
+	h.uc.HandleRoom(c.Request.Context(), roomID, ws)
+}
+END_FILE:internal/adapters/http/calls/handler.go
+# path: internal/platform/database/models/notification_model.go | lang: go | tokens: 149 | size: 599
+# imports: gorm.io/gorm
+BEGIN_FILE:internal/platform/database/models/notification_model.go
+package models
+
+import "gorm.io/gorm"
+
+type Notification struct {
+
+	gorm.Model
+	UserID uint `gorm:"index" json:"user_id"`
+	OrganisationID uint `gorm:"index" json:"organisation_id"`
+	User           UserModel      `gorm:"foreignKey:UserID" json:"user"`
+	Organisation   Organisation  `gorm:"foreignKey:OrganisationID" json:"organisation"`
+	Title          string        `json:"title"`
+	Message        string        `json:"message"`
+	IsRead         bool          `json:"is_read"`
+	NotificationType string        `json:"notification_type"`
+	Link             string        `json:"link"`
+}
+END_FILE:internal/platform/database/models/notification_model.go
+# path: internal/domain/callstate/entity.go | lang: go | tokens: 148 | size: 592
+# imports: time
+BEGIN_FILE:internal/domain/callstate/entity.go
+package callstate
+
+import "time"
+
+type State struct {
+	ID               uint       `json:"id"`
+	FirstName        string     `json:"first_name"`
+	LastName         string     `json:"last_name"`
+	Email            string     `json:"email"`
+	OrganisationID   uint       `json:"organisation_id"`
+	InCall           bool       `json:"in_call"`
+	LastCall         *time.Time `json:"last_call"`
+	CallingID        *string    `json:"calling_id"`
+	CallingFirstName *string    `json:"calling_first_name"`
+	CallingLastName  *string    `json:"calling_last_name"`
+	Offer            *string    `json:"offer"`
+}
+END_FILE:internal/domain/callstate/entity.go
+# path: internal/adapters/http/projects/routes.go | lang: go | tokens: 143 | size: 574
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/projects/routes.go
+package projects
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	projectGroup := r.Group("/api/v1/projects")
+	projectGroup.Use(validateToken)
+	{
+		projectGroup.POST("/create", h.CreateProject)
+		projectGroup.GET("/:id", h.GetProject)
+		projectGroup.PUT("/:id", h.UpdateProject)
+		projectGroup.GET("/organisation/:organisation_id", h.GetProjectsByOrganisation)
+		projectGroup.GET("/team/:team_id", h.GetProjectsByTeam)
+		projectGroup.GET("/less-data/:organisation_id", h.GetProjectsWithLessData)
+	}
+}
+END_FILE:internal/adapters/http/projects/routes.go
+# path: internal/domain/attendance/usecase.go | lang: go | tokens: 135 | size: 541
+BEGIN_FILE:internal/domain/attendance/usecase.go
+package attendance
+
+import (
+	"context"
+	"time"
+)
+
+type UseCase interface {
+	RecordAttendance(ctx context.Context, att *Attendance) error
+	UpdateAttendance(ctx context.Context, userID uint, checkOutTime *time.Time, checkOutPhoto int) (*Attendance, error)
+	GetAttendanceByUser(ctx context.Context, userID uint, offset int) ([]Attendance, error)
+	GetAttendanceByOrganisation(ctx context.Context, orgID uint, offset int) ([]Attendance, error)
+	GetAttendanceByDateAndUser(ctx context.Context, userID uint, date time.Time) (*Attendance, error)
+}
+END_FILE:internal/domain/attendance/usecase.go
+# path: internal/domain/projects/usecase.go | lang: go | tokens: 130 | size: 522
+# imports: context
+BEGIN_FILE:internal/domain/projects/usecase.go
+package projects
+
+import "context"
+
+type UseCase interface {
+	CreateProject(ctx context.Context, project *Project) error
+	GetProject(ctx context.Context, id uint) (*Project, error)
+	UpdateProject(ctx context.Context, project *Project) error
+	DeleteProject(ctx context.Context, id uint) error
+	GetProjectsByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
+	GetProjectsByTeam(ctx context.Context, teamID uint) ([]Project, error)
+	GetProjectsWithLessData(ctx context.Context, orgID uint) ([]Project, error)
+}
+END_FILE:internal/domain/projects/usecase.go
+# path: internal/domain/teams/repository.go | lang: go | tokens: 126 | size: 504
+# imports: context
+BEGIN_FILE:internal/domain/teams/repository.go
+package teams
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, team *Team) error
+	GetByID(ctx context.Context, id uint) (*Team, error)
+	Update(ctx context.Context, team *Team) error
+	Delete(ctx context.Context, id uint) error
+	GetByOrganisation(ctx context.Context, orgID uint) ([]Team, error)
+	GetAll(ctx context.Context) ([]Team, error)
+
+	CreateMember(ctx context.Context, member *TeamMember) error
+	GetMembersByTeam(ctx context.Context, teamID uint) ([]TeamMember, error)
+}
+END_FILE:internal/domain/teams/repository.go
+# path: internal/domain/chats/entity.go | lang: go | tokens: 121 | size: 487
+# imports: time
+BEGIN_FILE:internal/domain/chats/entity.go
+package chats
+
+import "time"
+
+type Chat struct {
+	ID                   uint       `json:"id"`
+	FirstName            string     `json:"first_name"`
+	LastName             string     `json:"last_name"`
+	Email                string     `json:"email"`
+	OrganisationID       uint       `json:"organisation_id"`
+	LastMessage          string     `json:"last_message"`
+	LastMessageTimestamp *time.Time `json:"last_message_timestamp"`
+	NumberOfMessage      int        `json:"number_of_message"`
+}
+END_FILE:internal/domain/chats/entity.go
+# path: internal/domain/projects/repository.go | lang: go | tokens: 119 | size: 477
+# imports: context
+BEGIN_FILE:internal/domain/projects/repository.go
+package projects
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, project *Project) error
+	GetByID(ctx context.Context, id uint) (*Project, error)
+	Update(ctx context.Context, project *Project) error
+	Delete(ctx context.Context, id uint) error
+	GetByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
+	GetByTeam(ctx context.Context, teamID uint) ([]Project, error)
+	GetWithLessData(ctx context.Context, orgID uint) ([]Project, error)
+}
+END_FILE:internal/domain/projects/repository.go
+# path: internal/usecase/chats/usecase.go | lang: go | tokens: 118 | size: 475
+# functions: NewService
+BEGIN_FILE:internal/usecase/chats/usecase.go
+package chats
+
+import (
+	"context"
+	domain "server/internal/domain/chats"
+)
+
+type service struct{ repo domain.Repository }
+
+func NewService(repo domain.Repository) domain.UseCase { return &service{repo: repo} }
+
+func (s *service) CreateChat(ctx context.Context, chat *domain.Chat) error {
+	return s.repo.Create(ctx, chat)
+}
+func (s *service) GetChats(ctx context.Context, organisationID uint) ([]domain.Chat, error) {
+	return s.repo.ListByOrganisation(ctx, organisationID)
+}
+END_FILE:internal/usecase/chats/usecase.go
+# path: internal/domain/auth/usecase.go | lang: go | tokens: 115 | size: 460
+# imports: context
+BEGIN_FILE:internal/domain/auth/usecase.go
+package auth
+
+import "context"
+
+// UseCase defines the application-facing ports for authentication operations.
+type UseCase interface {
+	SignUp(ctx context.Context, user *User, password string) (string, error)
+	SignIn(ctx context.Context, email, password string) (string, error)
+	CompleteSignIn(ctx context.Context, email, phone, password, city, country, profilePic string) (string, error)
+	ValidateEmployee(ctx context.Context, userID uint) (string, error)
+}
+END_FILE:internal/domain/auth/usecase.go
+# path: internal/adapters/http/teams/routes.go | lang: go | tokens: 112 | size: 451
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/teams/routes.go
+package teams
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	teamGroup := r.Group("/api/v1/teams")
+	teamGroup.Use(validateToken)
+	{
+		teamGroup.POST("/create", h.CreateTeam)
+		teamGroup.GET("/:id", h.GetTeam)
+		teamGroup.PUT("/:id", h.UpdateTeam)
+		teamGroup.GET("/organisation/:organisation_id", h.GetTeamsByOrganisation)
+		teamGroup.DELETE("/delete/:id", h.DeleteTeam)
+	}
+}
+END_FILE:internal/adapters/http/teams/routes.go
+# path: internal/domain/attendance/entity.go | lang: go | tokens: 111 | size: 447
+BEGIN_FILE:internal/domain/attendance/entity.go
+package attendance
+
+import (
+	"time"
+)
+
+type Attendance struct {
+	ID             uint       `json:"id"`
+	UserID         uint       `json:"user_id"`
+	Date           time.Time  `json:"date"`
+	CheckInTime    *time.Time `json:"check_in_time"`
+	CheckOutTime   *time.Time `json:"check_out_time"`
+	OrganisationID uint       `json:"organisation_id"`
+	CheckInPhoto   int        `json:"check_in_photo"`
+	CheckOutPhoto  int        `json:"check_out_photo"`
+}
+END_FILE:internal/domain/attendance/entity.go
+# path: internal/usecase/files/usecase.go | lang: go | tokens: 110 | size: 442
+# functions: NewService
+BEGIN_FILE:internal/usecase/files/usecase.go
+package files
+
+import (
+	"context"
+	domain "server/internal/domain/files"
+)
+
+type service struct {
+	repo domain.Repository
+}
+
+func NewService(repo domain.Repository) domain.UseCase {
+	return &service{repo: repo}
+}
+
+func (s *service) UploadFile(ctx context.Context, file *domain.File) error {
+	return s.repo.Create(ctx, file)
+}
+
+func (s *service) GetFile(ctx context.Context, id uint) (*domain.File, error) {
+	return s.repo.GetByID(ctx, id)
+}
+END_FILE:internal/usecase/files/usecase.go
+# path: internal/domain/attendance/repository.go | lang: go | tokens: 109 | size: 439
+BEGIN_FILE:internal/domain/attendance/repository.go
+package attendance
+
+import (
+	"context"
+	"time"
+)
+
+type Repository interface {
+	Create(ctx context.Context, att *Attendance) error
+	GetByUserAndDate(ctx context.Context, userID uint, date time.Time) (*Attendance, error)
+	Update(ctx context.Context, att *Attendance) error
+	GetByUser(ctx context.Context, userID uint, offset int) ([]Attendance, error)
+	GetByOrganisation(ctx context.Context, orgID uint, offset int) ([]Attendance, error)
+}
+END_FILE:internal/domain/attendance/repository.go
+# path: internal/adapters/http/organisation/routes.go | lang: go | tokens: 108 | size: 435
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/organisation/routes.go
+package organisation
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	organisationGroup := r.Group("/api/v1/organisation")
+	organisationGroup.Use(validateToken)
+	{
+		organisationGroup.POST("/register", validateToken, h.RegisterOrganisation)
+		organisationGroup.GET("/get/:id", h.GetOrganisation)
+		organisationGroup.PUT("/update/:id", h.UpdateOrganisation)
+	}
+}
+END_FILE:internal/adapters/http/organisation/routes.go
+# path: internal/domain/auth/repository.go | lang: go | tokens: 105 | size: 420
+# imports: context
+BEGIN_FILE:internal/domain/auth/repository.go
+package auth
+
+import "context"
+
+// Repository defines the persistence-facing ports for user-related operations.
+type Repository interface {
+	Create(ctx context.Context, user *User) error
+	GetByEmail(ctx context.Context, email string) (*User, error)
+	GetByPhoneNumber(ctx context.Context, phone string) (*User, error)
+	GetByID(ctx context.Context, id uint) (*User, error)
+	Update(ctx context.Context, user *User) error
+}
+END_FILE:internal/domain/auth/repository.go
+# path: internal/domain/teams/usecase.go | lang: go | tokens: 103 | size: 414
+# imports: context
+BEGIN_FILE:internal/domain/teams/usecase.go
+package teams
+
+import "context"
+
+type UseCase interface {
+	CreateTeam(ctx context.Context, team *Team, members []uint) error
+	GetTeam(ctx context.Context, id uint) (*Team, []TeamMember, error)
+	UpdateTeam(ctx context.Context, team *Team) error
+	DeleteTeam(ctx context.Context, id uint) error
+	GetTeamsByOrganisation(ctx context.Context, orgID uint) ([]Team, error)
+	GetTeams(ctx context.Context) ([]Team, error)
+}
+END_FILE:internal/domain/teams/usecase.go
+# path: internal/adapters/http/auth/routes.go | lang: go | tokens: 101 | size: 407
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/auth/routes.go
+package auth
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	r.POST("/api/v1/auth/signup", h.SignUp)
+	r.POST("/api/v1/auth/signin", h.SignIn)
+	
+	authGroup := r.Group("/api/v1/auth")
+	authGroup.Use(validateToken)
+	{
+		authGroup.POST("/complete-signin", h.CompleteSignIn)
+		authGroup.GET("/validate-employee", h.ValidateEmployee)
+	}
+}
+END_FILE:internal/adapters/http/auth/routes.go
+# path: internal/adapters/http/attendance/routes.go | lang: go | tokens: 99 | size: 396
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/attendance/routes.go
+package attendance
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	attendanceGroup := r.Group("/api/v1/attendence")
+	attendanceGroup.Use(validateToken)
+	{
+		attendanceGroup.POST("/create", h.PostAttendance)
+		attendanceGroup.PUT("/:id", h.UpdateAttendance)
+		attendanceGroup.GET("/:id", h.GetAttendanceByDateAndUser)
+	}
+}
+END_FILE:internal/adapters/http/attendance/routes.go
+# path: internal/domain/organisation/repository.go | lang: go | tokens: 98 | size: 394
+# imports: context
+BEGIN_FILE:internal/domain/organisation/repository.go
+package organisation
+
+import "context"
+
+// Repository defines persistence-facing ports for organisation operations.
+type Repository interface {
+	Create(ctx context.Context, org *Entity) error
+	CreateWithOwner(ctx context.Context, org *Entity, ownerUserID uint) (*OwnerEmployeeRow, error)
+	GetByID(ctx context.Context, id uint) (*Entity, error)
+	Update(ctx context.Context, org *Entity) error
+}
+END_FILE:internal/domain/organisation/repository.go
+# path: internal/domain/messages/entity.go | lang: go | tokens: 83 | size: 334
+# imports: time
+BEGIN_FILE:internal/domain/messages/entity.go
+package messages
+
+import "time"
+
+type Message struct {
+	ID         uint      `json:"id"`
+	RoomID     string    `json:"room_id"`
+	SenderID   string    `json:"sender_id"`
+	ReceiverID string    `json:"receiver_id"`
+	Message    string    `json:"message"`
+	IsSeen     bool      `json:"is_seen"`
+	TimeStamp  time.Time `json:"time_stamp"`
+}
+END_FILE:internal/domain/messages/entity.go
+# path: internal/domain/chats/repository.go | lang: go | tokens: 82 | size: 330
+# imports: context
+BEGIN_FILE:internal/domain/chats/repository.go
+package chats
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, chat *Chat) error
+	ListByOrganisation(ctx context.Context, organisationID uint) ([]Chat, error)
+	UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error
+	IncrementMessageCount(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/chats/repository.go
+# path: internal/domain/organisation/usecase.go | lang: go | tokens: 82 | size: 329
+# imports: context
+BEGIN_FILE:internal/domain/organisation/usecase.go
+package organisation
+
+import "context"
+
+// UseCase defines application-facing ports for organisation operations.
+type UseCase interface {
+	Register(ctx context.Context, org *Entity, ownerUserID uint) (*OwnerEmployeeRow, error)
+	Get(ctx context.Context, id uint) (*Entity, error)
+	Update(ctx context.Context, org *Entity) error
+}
+END_FILE:internal/domain/organisation/usecase.go
+# path: internal/domain/callstate/repository.go | lang: go | tokens: 79 | size: 319
+# imports: context
+BEGIN_FILE:internal/domain/callstate/repository.go
+package callstate
+
+import "context"
+
+type Repository interface {
+	CreateOrUpdate(ctx context.Context, state *State) error
+	GetByID(ctx context.Context, id uint) (*State, error)
+	UpdateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
+	EndCall(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/callstate/repository.go
+# path: internal/domain/callstate/usecase.go | lang: go | tokens: 78 | size: 312
+# imports: context
+BEGIN_FILE:internal/domain/callstate/usecase.go
+package callstate
+
+import "context"
+
+type UseCase interface {
+	CreateOrUpdate(ctx context.Context, state *State) error
+	Get(ctx context.Context, id uint) (*State, error)
+	CreateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
+	EndCall(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/callstate/usecase.go
+# path: internal/adapters/http/callstate/routes.go | lang: go | tokens: 76 | size: 306
+# imports: github.com/gin-gonic/gin
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/callstate/routes.go
+package callstate
+
+import "github.com/gin-gonic/gin"
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	g := r.Group("/api/v1/calls")
+	g.Use(validateToken)
+	{
+		g.POST("/upsert", h.Upsert)
+		g.GET("/:id", h.Get)
+		g.PUT("/offer/:id", h.Offer)
+		g.PUT("/end/:id", h.End)
+	}
+}
+END_FILE:internal/adapters/http/callstate/routes.go
+# path: internal/platform/database/models/file_model.go | lang: go | tokens: 74 | size: 297
+# imports: gorm.io/gorm
+BEGIN_FILE:internal/platform/database/models/file_model.go
+package models
+
+import "gorm.io/gorm"
+
+type File struct {
+	gorm.Model
+	FileName string `gorm:"not null" json:"file_name"`
+	Data     []byte `gorm:"type:bytea;not null" json:"data"`
+	FileType string `gorm:"not null" json:"file_type"`
+	FileSize int64  `gorm:"not null" json:"file_size"`
+}
+END_FILE:internal/platform/database/models/file_model.go
+# path: internal/adapters/http/messages/routes.go | lang: go | tokens: 66 | size: 266
+# imports: github.com/gin-gonic/gin
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/messages/routes.go
+package messages
+
+import "github.com/gin-gonic/gin"
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	g := r.Group("/api/v1/messages")
+	g.Use(validateToken)
+	{
+		g.GET("/:peer_id", h.GetMessages)
+		g.POST("/send", h.SendMessage)
+	}
+}
+END_FILE:internal/adapters/http/messages/routes.go
+# path: internal/domain/messages/repository.go | lang: go | tokens: 63 | size: 253
+# imports: context
+BEGIN_FILE:internal/domain/messages/repository.go
+package messages
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, msg *Message) error
+	ListByRoom(ctx context.Context, roomID string) ([]Message, error)
+	MarkSeen(ctx context.Context, roomID string, receiverID string) error
+}
+END_FILE:internal/domain/messages/repository.go
+# path: internal/adapters/http/chats/routes.go | lang: go | tokens: 60 | size: 241
+# imports: github.com/gin-gonic/gin
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/chats/routes.go
+package chats
+
+import "github.com/gin-gonic/gin"
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	g := r.Group("/api/v1/chats")
+	g.Use(validateToken)
+	{
+		g.POST("/create", h.Create)
+		g.GET("", h.List)
+	}
+}
+END_FILE:internal/adapters/http/chats/routes.go
+# path: internal/platform/database/models/message.go | lang: go | tokens: 57 | size: 230
+BEGIN_FILE:internal/platform/database/models/message.go
+package models
+type Message struct {
+	Type      string      `json:"type"`
+	Offer     interface{} `json:"offer,omitempty"`
+	Answer    interface{} `json:"answer,omitempty"`
+	Candidate interface{} `json:"candidate,omitempty"`
+}
+END_FILE:internal/platform/database/models/message.go
+# path: internal/adapters/http/files/routes.go | lang: go | tokens: 56 | size: 227
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/files/routes.go
+package files
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler) {
+	fileGroup := r.Group("/api/v1/file")
+	{
+		fileGroup.POST("/upload", h.UploadFile)
+		fileGroup.GET("/:id", h.GetFile)
+	}
+}
+END_FILE:internal/adapters/http/files/routes.go
+# path: internal/domain/files/entity.go | lang: go | tokens: 50 | size: 201
+BEGIN_FILE:internal/domain/files/entity.go
+package files
+
+type File struct {
+	ID       uint   `json:"id"`
+	FileName string `json:"file_name"`
+	Data     []byte `json:"-"`
+	FileType string `json:"file_type"`
+	FileSize int64  `json:"file_size"`
+}
+END_FILE:internal/domain/files/entity.go
+# path: internal/domain/messages/usecase.go | lang: go | tokens: 48 | size: 194
+# imports: context
+BEGIN_FILE:internal/domain/messages/usecase.go
+package messages
+
+import "context"
+
+type UseCase interface {
+	GetMessages(ctx context.Context, me uint, peerID string) ([]Message, error)
+	SendMessage(ctx context.Context, msg *Message) error
+}
+END_FILE:internal/domain/messages/usecase.go
+# path: internal/domain/chats/usecase.go | lang: go | tokens: 44 | size: 179
+# imports: context
+BEGIN_FILE:internal/domain/chats/usecase.go
+package chats
+
+import "context"
+
+type UseCase interface {
+	CreateChat(ctx context.Context, chat *Chat) error
+	GetChats(ctx context.Context, organisationID uint) ([]Chat, error)
+}
+END_FILE:internal/domain/chats/usecase.go
+# path: internal/domain/files/repository.go | lang: go | tokens: 41 | size: 164
+# imports: context
+BEGIN_FILE:internal/domain/files/repository.go
+package files
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, file *File) error
+	GetByID(ctx context.Context, id uint) (*File, error)
+}
+END_FILE:internal/domain/files/repository.go
+# path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
+# imports: context
+BEGIN_FILE:internal/domain/files/usecase.go
+package files
+
+import "context"
+
+type UseCase interface {
+	UploadFile(ctx context.Context, file *File) error
+	GetFile(ctx context.Context, id uint) (*File, error)
+}
+END_FILE:internal/domain/files/usecase.go
+# path: internal/domain/calls/usecase.go | lang: go | tokens: 41 | size: 165
+BEGIN_FILE:internal/domain/calls/usecase.go
+package calls
+
+import (
+	"context"
+	"github.com/gorilla/websocket"
+)
+
+type UseCase interface {
+	HandleRoom(ctx context.Context, roomID string, ws *websocket.Conn)
+}
+END_FILE:internal/domain/calls/usecase.go
+# path: internal/adapters/http/calls/routes.go | lang: go | tokens: 36 | size: 147
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/calls/routes.go
+package calls
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler) {
+	r.GET("/api/v1/call/:id", h.HandleRoom)
+}
+END_FILE:internal/adapters/http/calls/routes.go
+# included: 99 / 99 | total tokens: 34176

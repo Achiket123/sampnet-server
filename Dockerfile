@@ -12,7 +12,7 @@ RUN go mod download
 COPY . .
 
 # Build the Go application
-RUN go build -o main .
+RUN go build -o main ./cmd/server
 
 # Start a new, clean image with minimal dependencies to run the app
 FROM gcr.io/distroless/base-debian10
