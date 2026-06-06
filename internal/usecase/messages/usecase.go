@@ -3,54 +3,79 @@ package messages
 import (
 	"context"
 	"errors"
-	chatDomain "server/internal/domain/chats"
-	domain "server/internal/domain/messages"
-	"sort"
 	"strconv"
 	"time"
+
+	chatDomain "server/internal/domain/chats"
+	domain "server/internal/domain/messages"
+	ws "server/internal/platform/websocket"
 )
 
 var ErrInvalidUserID = errors.New("invalid user id")
 
 type service struct {
-	repo     domain.Repository
-	chatRepo chatDomain.Repository
+	repo      domain.Repository
+	chatRepo  chatDomain.Repository
+	wsManager *ws.Manager
 }
 
-func NewService(repo domain.Repository, chatRepo chatDomain.Repository) domain.UseCase {
-	return &service{repo: repo, chatRepo: chatRepo}
+func NewService(repo domain.Repository, chatRepo chatDomain.Repository, wsManager *ws.Manager) domain.UseCase {
+	return &service{repo: repo, chatRepo: chatRepo, wsManager: wsManager}
 }
 
-func roomID(a, b string) string {
-	ids := []string{a, b}
-	sort.Strings(ids)
-	return ids[0] + "-" + ids[1]
+func (s *service) GetMessages(ctx context.Context, roomID string, cursor string, limit int) (*domain.CursorPage, error) {
+	return s.repo.ListByRoomCursor(ctx, roomID, cursor, limit)
 }
 
-func (s *service) GetMessages(ctx context.Context, me uint, peerID string) ([]domain.Message, error) {
-	mine := strconv.FormatUint(uint64(me), 10)
-	r := roomID(peerID, mine)
-	_ = s.repo.MarkSeen(ctx, r, mine)
-	return s.repo.ListByRoom(ctx, r)
-}
+func (s *service) SendMessage(ctx context.Context, msg *domain.Message) (*domain.Message, error) {
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now().UTC()
+	}
 
-func (s *service) SendMessage(ctx context.Context, msg *domain.Message) error {
-	receiver, err := strconv.ParseUint(msg.ReceiverID, 10, 64)
+	createdMsg, err := s.repo.Create(ctx, msg)
 	if err != nil {
-		return ErrInvalidUserID
+		return nil, err
 	}
 
-	msg.RoomID = roomID(msg.ReceiverID, msg.SenderID)
-	if msg.TimeStamp.IsZero() {
-		msg.TimeStamp = time.Now().UTC()
+	// Fetch the chat by room ID to update its metadata
+	chat, err := s.chatRepo.GetByRoomID(ctx, createdMsg.RoomID)
+	if err == nil {
+		ts := createdMsg.CreatedAt.UTC().Format(time.RFC3339)
+		_ = s.chatRepo.UpdateLastMessage(ctx, chat.ID, createdMsg.Message, &ts)
+		_ = s.chatRepo.IncrementMessageCount(ctx, chat.ID)
+
+		// Get chat participants to push notification
+		participants, err := s.chatRepo.GetParticipants(ctx, chat.ID)
+		if err == nil {
+			for _, p := range participants {
+				participantUserIDStr := strconv.FormatUint(uint64(p.UserID), 10)
+				if participantUserIDStr != createdMsg.SenderID {
+					_ = s.chatRepo.UpdateUnreadCount(ctx, chat.ID, p.UserID, 1)
+				}
+			}
+			// Push via WebSocket to the room
+			if s.wsManager != nil {
+				_ = s.wsManager.SendToRoom(chat.RoomID, "new_message", createdMsg)
+			}
+		}
 	}
 
-	if err := s.chatRepo.IncrementMessageCount(ctx, uint(receiver)); err != nil {
-		return err
+	return createdMsg, nil
+}
+
+func (s *service) MarkSeen(ctx context.Context, roomID string, receiverID string) error {
+	err := s.repo.MarkSeen(ctx, roomID, receiverID)
+	if err == nil {
+		// Reset unread count for this user in this chat
+		chatID, parseErr := strconv.ParseUint(roomID, 10, 64)
+		userID, parseErr2 := strconv.ParseUint(receiverID, 10, 64)
+		if parseErr == nil && parseErr2 == nil {
+			_ = s.chatRepo.ResetUnreadCount(ctx, uint(chatID), uint(userID))
+		}
 	}
-	ts := msg.TimeStamp.UTC().Format(time.RFC3339)
-	if err := s.chatRepo.UpdateLastMessage(ctx, uint(receiver), msg.Message, &ts); err != nil {
-		return err
-	}
-	return s.repo.Create(ctx, msg)
+	return err
+}
+
+func (s *service) DeleteMessage(ctx context.Context, messageID uint, requestingUserID string) error {
+	return s.repo.DeleteMessage(ctx, messageID, requestingUserID)
 }

@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"server/internal/domain/notifications"
 )
@@ -23,6 +24,9 @@ func (b *Broadcaster) BroadcastNotification(ctx context.Context, n *notification
 	}
 
 	// Send to the specific user's websocket connections
-	b.hub.BroadcastToUser(n.UserID, message)
+	b.hub.Broadcast <- &HubMessage{
+		TargetUserID: fmt.Sprintf("%d", n.UserID),
+		Payload:      message,
+	}
 	return nil
 }

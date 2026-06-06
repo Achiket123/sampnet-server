@@ -10,5 +10,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 		g.GET("/:id", h.Get)
 		g.PUT("/offer/:id", h.Offer)
 		g.PUT("/end/:id", h.End)
+		g.POST("/initiate", h.InitiateCall)
 	}
 }

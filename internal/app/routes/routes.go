@@ -80,6 +80,7 @@ func SetupRoutes(r *gin.Engine) {
 	hub := websocket.NewHub()
 	go hub.Run()
 	broadcaster := websocket.NewBroadcaster(hub)
+	wsManager := websocket.NewManager(hub)
 
 	notificationRepository := notificationsRepo.NewGormRepository(database.DB)
 	notificationUseCase := notificationsService.NewService(notificationRepository, broadcaster)
@@ -152,13 +153,13 @@ func SetupRoutes(r *gin.Engine) {
 	chatHTTP.RegisterRoutes(r, chatHandler, validateToken)
 
 	messageRepository := messageRepo.NewGormRepository(database.DB)
-	messageUseCase := messageService.NewService(messageRepository, chatRepository)
+	messageUseCase := messageService.NewService(messageRepository, chatRepository, wsManager)
 	messageHandler := messageHTTP.NewHandler(messageUseCase)
 	messageHTTP.RegisterRoutes(r, messageHandler, validateToken)
 
 	callStateRepository := callStateRepo.NewGormRepository(database.DB)
 	callStateUseCase := callStateService.NewService(callStateRepository)
-	callStateHandler := callStateHTTP.NewHandler(callStateUseCase)
+	callStateHandler := callStateHTTP.NewHandler(callStateUseCase, wsManager, chatRepository)
 	callStateHTTP.RegisterRoutes(r, callStateHandler, validateToken)
 
 	callUseCase := callService.NewService()

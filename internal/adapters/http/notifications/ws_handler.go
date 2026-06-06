@@ -1,6 +1,7 @@
 package notifications
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"server/internal/platform/miscallenous"
@@ -26,34 +27,9 @@ func (h *Handler) Upgrade(c *gin.Context) {
 	}
 
 	var userID uint
-	var organisationID uint
-	var employeeID uint
-
 	if claims, ok := decodedToken.Claims.(jwt.MapClaims); ok {
 		if sub, ok := claims["sub"].(float64); ok {
 			userID = uint(sub)
-		}
-		if emp, ok := claims["employee"].(map[string]interface{}); ok {
-			if orgID, ok := emp["organisation_id"].(float64); ok {
-				organisationID = uint(orgID)
-			}
-			if id, ok := emp["id"].(float64); ok {
-				employeeID = uint(id)
-			}
-		} else if mgr, ok := claims["manager"].(map[string]interface{}); ok {
-			if orgID, ok := mgr["organisation_id"].(float64); ok {
-				organisationID = uint(orgID)
-			}
-			if id, ok := mgr["id"].(float64); ok {
-				employeeID = uint(id)
-			}
-		} else if boss, ok := claims["boss"].(map[string]interface{}); ok {
-			if orgID, ok := boss["organisation_id"].(float64); ok {
-				organisationID = uint(orgID)
-			}
-			if id, ok := boss["id"].(float64); ok {
-				employeeID = uint(id)
-			}
 		}
 	}
 
@@ -70,12 +46,10 @@ func (h *Handler) Upgrade(c *gin.Context) {
 	}
 
 	client := &websocket.Client{
-		Hub:            h.hub,
-		Conn:           conn,
-		Send:           make(chan []byte, 256),
-		UserID:         userID,
-		EmployeeID:     employeeID,
-		OrganisationID: organisationID,
+		Hub:    h.hub,
+		Conn:   conn,
+		Send:   make(chan []byte, 256),
+		UserID: fmt.Sprintf("%d", userID),
 	}
 
 	client.Hub.Register <- client

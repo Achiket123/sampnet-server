@@ -55,6 +55,7 @@ func PerformMigrations() error {
 		&models.Notification{},
 		&models.Chat{},
 		&models.ChatMessage{},
+		&models.ChatParticipant{},
 		&models.CallState{},
 		&models.TaskComment{},
 		&models.TaskAttachment{},

@@ -1,6 +1,6 @@
 # Code Context
-# Generated: 2026-06-06T17:26:38+05:30
-# Files: 234
+# Generated: 2026-06-06T22:54:39+05:30
+# Files: 235
 #
 # To extract all files back to disk, run:
 #   awk '/^BEGIN_FILE:/{f=substr($0,11); sub(/^:/, "", f); next} /^END_FILE:/{f=""; next} f{print > f}' code_context.txt
@@ -4454,7 +4454,7 @@ func (h *Handler) DeleteMilestone(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Milestone deleted successfully"})
 }
 END_FILE:internal/adapters/http/projects/handler.go
-# path: internal/app/routes/routes.go | lang: go | tokens: 2435 | size: 9742
+# path: internal/app/routes/routes.go | lang: go | tokens: 2451 | size: 9804
 # functions: SetupRoutes
 BEGIN_FILE:internal/app/routes/routes.go
 package routes
@@ -4539,6 +4539,7 @@ func SetupRoutes(r *gin.Engine) {
 	hub := websocket.NewHub()
 	go hub.Run()
 	broadcaster := websocket.NewBroadcaster(hub)
+	wsManager := websocket.NewManager(hub)
 
 	notificationRepository := notificationsRepo.NewGormRepository(database.DB)
 	notificationUseCase := notificationsService.NewService(notificationRepository, broadcaster)
@@ -4611,13 +4612,13 @@ func SetupRoutes(r *gin.Engine) {
 	chatHTTP.RegisterRoutes(r, chatHandler, validateToken)
 
 	messageRepository := messageRepo.NewGormRepository(database.DB)
-	messageUseCase := messageService.NewService(messageRepository, chatRepository)
+	messageUseCase := messageService.NewService(messageRepository, chatRepository, wsManager)
 	messageHandler := messageHTTP.NewHandler(messageUseCase)
 	messageHTTP.RegisterRoutes(r, messageHandler, validateToken)
 
 	callStateRepository := callStateRepo.NewGormRepository(database.DB)
 	callStateUseCase := callStateService.NewService(callStateRepository)
-	callStateHandler := callStateHTTP.NewHandler(callStateUseCase)
+	callStateHandler := callStateHTTP.NewHandler(callStateUseCase, wsManager)
 	callStateHTTP.RegisterRoutes(r, callStateHandler, validateToken)
 
 	callUseCase := callService.NewService()
@@ -4650,7 +4651,7 @@ func SetupRoutes(r *gin.Engine) {
 	peopleHTTP.RegisterRoutes(r, peopleHandler, validateToken)
 }
 END_FILE:internal/app/routes/routes.go
-# path: internal/adapters/repository/search/gorm_repository.go | lang: go | tokens: 2433 | size: 9732
+# path: internal/adapters/repository/search/gorm_repository.go | lang: go | tokens: 2334 | size: 9336
 # functions: NewGormRepository, contains, wantType
 BEGIN_FILE:internal/adapters/repository/search/gorm_repository.go
 package search
@@ -4658,6 +4659,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	domain "server/internal/domain/search"
@@ -4803,25 +4805,22 @@ func (r *gormRepository) Search(ctx context.Context, filters *domain.SearchFilte
 		}
 	}
 
-	// ── Chats (group chats only — Chat model stores DMs by user name) ────────
-	// NOTE: The Chat model in this codebase is a DM/sync table (not a group chat
-	// model with is_group). We skip the is_group filter and search by first_name
-	// or last_name within the chat table so managers can find colleagues quickly.
-	// If a true group-chat model is introduced later, add is_group = true here.
+	// ── Chats (Group chats) ────────
 	if wantType(filters, "chat") {
 		var chats []models.Chat
 		err := r.db.WithContext(ctx).
-			Select("id, first_name, last_name, organisation_id").
-			Where("organisation_id = ? AND (first_name ILIKE ? OR last_name ILIKE ?)", orgID, like, like).
+			Select("id, name, organisation_id").
+			Where("organisation_id = ? AND name ILIKE ?", orgID, like).
 			Find(&chats).Error
 		if err != nil {
+			log.Default().Println("search chats error", err)
 			return nil, fmt.Errorf("search chats: %w", err)
 		}
 		for _, c := range chats {
 			chatItems = append(chatItems, domain.SearchResultItem{
 				ID:             c.ID,
 				Type:           "chat",
-				Title:          strings.TrimSpace(c.FirstName + " " + c.LastName),
+				Title:          c.Name,
 				OrganisationID: c.OrganisationID,
 			})
 		}
@@ -4870,7 +4869,7 @@ func (r *gormRepository) Search(ctx context.Context, filters *domain.SearchFilte
 			})
 		}
 	}
-	
+
 	// ── Research ─────────────────────────────────────────────────────────────
 	var researchItems []domain.SearchResultItem
 	if wantType(filters, "research") {
@@ -5629,6 +5628,304 @@ func (h *Handler) ReorderStages(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Stages reordered successfully"})
 }
 END_FILE:internal/adapters/http/people/handler.go
+# path: internal/adapters/repository/chats/gorm_repository.go | lang: go | tokens: 2153 | size: 8614
+# functions: NewGormRepository, toDomainChat
+BEGIN_FILE:internal/adapters/repository/chats/gorm_repository.go
+package chats
+
+import (
+	"context"
+	"fmt"
+	domain "server/internal/domain/chats"
+	"server/internal/platform/database/models"
+	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+type GormRepository struct{ db *gorm.DB }
+
+func NewGormRepository(db *gorm.DB) *GormRepository { return &GormRepository{db: db} }
+
+func toDomainChat(row models.Chat, participants []models.ChatParticipant) domain.Chat {
+	var parts []domain.ChatParticipant
+	for _, p := range participants {
+		parts = append(parts, domain.ChatParticipant{
+			ChatID:            p.ChatID,
+			UserID:            p.UserID,
+			UnreadCount:       p.UnreadCount,
+			LastReadMessageID: p.LastReadMessageID,
+			JoinedAt:          p.JoinedAt,
+		})
+	}
+	var createdBy uint
+	if row.CreatedBy != nil {
+		createdBy = *row.CreatedBy
+	}
+
+	return domain.Chat{
+		ID:             row.ID,
+		OrganisationID: row.OrganisationID,
+		Name:           row.Name,
+		IsGroup:        row.IsGroup,
+		CreatedBy:      createdBy,
+		LastMessage:    row.LastMessage,
+		LastMessageAt:  row.LastMessageAt,
+		MessageCount:   row.MessageCount,
+		Participants:   parts,
+		CreatedAt:      row.CreatedAt,
+		UpdatedAt:      row.UpdatedAt,
+	}
+}
+
+func (r *GormRepository) Create(ctx context.Context, chat *domain.Chat) error {
+	var createdBy *uint
+	if chat.CreatedBy > 0 {
+		createdBy = &chat.CreatedBy
+	}
+	m := models.Chat{
+		OrganisationID: chat.OrganisationID,
+		Name:           chat.Name,
+		IsGroup:        chat.IsGroup,
+		CreatedBy:      createdBy,
+		LastMessage:    chat.LastMessage,
+		LastMessageAt:  chat.LastMessageAt,
+		MessageCount:   chat.MessageCount,
+	}
+	if err := r.db.WithContext(ctx).Create(&m).Error; err != nil {
+		return err
+	}
+	chat.ID = m.ID
+	chat.CreatedAt = m.CreatedAt
+	chat.UpdatedAt = m.UpdatedAt
+
+	// Insert participants
+	for i, p := range chat.Participants {
+		pModel := models.ChatParticipant{
+			ChatID:      m.ID,
+			UserID:      p.UserID,
+			UnreadCount: p.UnreadCount,
+		}
+		if err := r.db.WithContext(ctx).Create(&pModel).Error; err != nil {
+			return err
+		}
+		chat.Participants[i].ChatID = m.ID
+		chat.Participants[i].JoinedAt = pModel.JoinedAt
+	}
+
+	return nil
+}
+
+func (r *GormRepository) ListByOrganisation(ctx context.Context, organisationID uint) ([]domain.Chat, error) {
+	var rows []models.Chat
+	if err := r.db.WithContext(ctx).Where("organisation_id = ?", organisationID).Order("last_message_at desc nulls last").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	
+	// Preload participants manually (or could use gorm preload if we define relations, but we don't have explicit relations in models currently)
+	var chatIDs []uint
+	for _, row := range rows {
+		chatIDs = append(chatIDs, row.ID)
+	}
+
+	var allParticipants []models.ChatParticipant
+	if len(chatIDs) > 0 {
+		r.db.WithContext(ctx).Where("chat_id IN ?", chatIDs).Find(&allParticipants)
+	}
+
+	partMap := make(map[uint][]models.ChatParticipant)
+	for _, p := range allParticipants {
+		partMap[p.ChatID] = append(partMap[p.ChatID], p)
+	}
+
+	var out []domain.Chat
+	for _, row := range rows {
+		out = append(out, toDomainChat(row, partMap[row.ID]))
+	}
+	return out, nil
+}
+
+func (r *GormRepository) ListByUser(ctx context.Context, userID uint, orgID uint) ([]domain.Chat, error) {
+	var participants []models.ChatParticipant
+	if err := r.db.WithContext(ctx).Where("user_id = ?", userID).Find(&participants).Error; err != nil {
+		return nil, err
+	}
+
+	var chatIDs []uint
+	for _, p := range participants {
+		chatIDs = append(chatIDs, p.ChatID)
+	}
+
+	if len(chatIDs) == 0 {
+		return []domain.Chat{}, nil
+	}
+
+	var rows []models.Chat
+	if err := r.db.WithContext(ctx).Where("id IN ? AND organisation_id = ?", chatIDs, orgID).Order("last_message_at desc nulls last").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	// fetch all participants for these chats
+	var allParticipants []models.ChatParticipant
+	if err := r.db.WithContext(ctx).Where("chat_id IN ?", chatIDs).Find(&allParticipants).Error; err == nil {
+		// Also fetch user details to populate FirstName, LastName, AvatarURL
+		var userIDs []uint
+		for _, p := range allParticipants {
+			userIDs = append(userIDs, p.UserID)
+		}
+
+		var users []models.UserModel
+		if len(userIDs) > 0 {
+			r.db.WithContext(ctx).Where("id IN ?", userIDs).Find(&users)
+		}
+		userMap := make(map[uint]models.UserModel)
+		for _, u := range users {
+			userMap[u.ID] = u
+		}
+
+		partMap := make(map[uint][]domain.ChatParticipant)
+		for _, p := range allParticipants {
+			dp := domain.ChatParticipant{
+				ChatID:            p.ChatID,
+				UserID:            p.UserID,
+				UnreadCount:       p.UnreadCount,
+				LastReadMessageID: p.LastReadMessageID,
+				JoinedAt:          p.JoinedAt,
+			}
+			if u, ok := userMap[p.UserID]; ok {
+				dp.FirstName = u.FirstName
+				dp.LastName = u.LastName
+				dp.AvatarURL = u.ProfilePic
+			}
+			partMap[p.ChatID] = append(partMap[p.ChatID], dp)
+		}
+
+		var out []domain.Chat
+		for _, row := range rows {
+			chat := toDomainChat(row, nil)
+			chat.Participants = partMap[row.ID]
+			
+			// Auto name DM
+			if !chat.IsGroup && len(chat.Participants) == 2 {
+				for _, p := range chat.Participants {
+					if p.UserID != userID {
+						chat.Name = fmt.Sprintf("%s %s", p.FirstName, p.LastName)
+						break
+					}
+				}
+			}
+			
+			out = append(out, chat)
+		}
+		return out, nil
+	}
+
+	return nil, nil
+}
+
+func (r *GormRepository) GetByID(ctx context.Context, chatID uint) (*domain.Chat, error) {
+	var row models.Chat
+	if err := r.db.WithContext(ctx).First(&row, chatID).Error; err != nil {
+		return nil, err
+	}
+
+	var parts []models.ChatParticipant
+	r.db.WithContext(ctx).Where("chat_id = ?", chatID).Find(&parts)
+
+	chat := toDomainChat(row, parts)
+	return &chat, nil
+}
+
+func (r *GormRepository) UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error {
+	var ts *time.Time
+	if at != nil && *at != "" {
+		parsed, err := time.Parse(time.RFC3339, *at)
+		if err == nil {
+			ts = &parsed
+		}
+	}
+	updates := map[string]any{"last_message": message, "last_message_at": ts}
+	return r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", id).Updates(updates).Error
+}
+
+func (r *GormRepository) IncrementMessageCount(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", id).UpdateColumn("message_count", gorm.Expr("message_count + 1")).Error
+}
+
+func (r *GormRepository) GetOrCreateDM(ctx context.Context, userA uint, userB uint, orgID uint) (*domain.Chat, error) {
+	// Find existing DM between userA and userB
+	var chatID uint
+	
+	// Query to find a chat where both participants exist AND IsGroup = false
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT c.id FROM chats c
+		JOIN chat_participants p1 ON c.id = p1.chat_id
+		JOIN chat_participants p2 ON c.id = p2.chat_id
+		WHERE c.is_group = false AND c.organisation_id = ?
+		AND p1.user_id = ? AND p2.user_id = ?
+	`, orgID, userA, userB).Scan(&chatID).Error
+
+	if err != nil || chatID == 0 {
+		// create new DM
+		chat := &domain.Chat{
+			OrganisationID: orgID,
+			IsGroup:        false,
+			Participants: []domain.ChatParticipant{
+				{UserID: userA},
+				{UserID: userB},
+			},
+		}
+		if err := r.Create(ctx, chat); err != nil {
+			return nil, err
+		}
+		return r.GetByID(ctx, chat.ID)
+	}
+
+	return r.GetByID(ctx, chatID)
+}
+
+func (r *GormRepository) AddParticipant(ctx context.Context, chatID uint, userID uint) error {
+	p := models.ChatParticipant{
+		ChatID: chatID,
+		UserID: userID,
+	}
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&p).Error
+}
+
+func (r *GormRepository) UpdateUnreadCount(ctx context.Context, chatID uint, userID uint, delta int) error {
+	if delta > 0 {
+		return r.db.WithContext(ctx).Model(&models.ChatParticipant{}).
+			Where("chat_id = ? AND user_id = ?", chatID, userID).
+			UpdateColumn("unread_count", gorm.Expr("unread_count + ?", delta)).Error
+	}
+	return nil
+}
+
+func (r *GormRepository) ResetUnreadCount(ctx context.Context, chatID uint, userID uint) error {
+	return r.db.WithContext(ctx).Model(&models.ChatParticipant{}).
+		Where("chat_id = ? AND user_id = ?", chatID, userID).
+		Update("unread_count", 0).Error
+}
+
+func (r *GormRepository) GetParticipants(ctx context.Context, chatID uint) ([]domain.ChatParticipant, error) {
+	var parts []models.ChatParticipant
+	if err := r.db.WithContext(ctx).Where("chat_id = ?", chatID).Find(&parts).Error; err != nil {
+		return nil, err
+	}
+	var out []domain.ChatParticipant
+	for _, p := range parts {
+		out = append(out, domain.ChatParticipant{
+			ChatID:            p.ChatID,
+			UserID:            p.UserID,
+			UnreadCount:       p.UnreadCount,
+			LastReadMessageID: p.LastReadMessageID,
+			JoinedAt:          p.JoinedAt,
+		})
+	}
+	return out, nil
+}
+END_FILE:internal/adapters/repository/chats/gorm_repository.go
 # path: internal/domain/people/entity.go | lang: go | tokens: 2019 | size: 8077
 BEGIN_FILE:internal/domain/people/entity.go
 package people
@@ -7563,131 +7860,156 @@ func TestCancelLeave_Unauthorized(t *testing.T) {
 	}
 }
 END_FILE:internal/usecase/leave/usecase_test.go
-# path: internal/adapters/repository/chats/gorm_repository.go | lang: go | tokens: 1092 | size: 4371
-# functions: NewGormRepository
-BEGIN_FILE:internal/adapters/repository/chats/gorm_repository.go
-package chats
+# path: internal/adapters/repository/messages/gorm_repository.go | lang: go | tokens: 1141 | size: 4567
+# functions: NewGormRepository, toDomainMessage
+BEGIN_FILE:internal/adapters/repository/messages/gorm_repository.go
+package messages
 
 import (
 	"context"
-	domain "server/internal/domain/chats"
+	"encoding/base64"
+	"fmt"
+	"strconv"
+	"strings"
+	domain "server/internal/domain/messages"
 	"server/internal/platform/database/models"
-	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type GormRepository struct{ db *gorm.DB }
 
 func NewGormRepository(db *gorm.DB) *GormRepository { return &GormRepository{db: db} }
 
-func (r *GormRepository) Create(ctx context.Context, chat *domain.Chat) error {
-	m := models.Chat{ID: chat.ID, FirstName: chat.FirstName, LastName: chat.LastName, Email: chat.Email, OrganisationID: chat.OrganisationID, LastMessage: chat.LastMessage, LastMessageTimestamp: chat.LastMessageTimestamp, NumberOfMessage: chat.NumberOfMessage}
-	return r.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&m).Error
+func toDomainMessage(row models.ChatMessage) domain.Message {
+	return domain.Message{
+		ID:             row.ID,
+		RoomID:         row.RoomID,
+		SenderID:       row.SenderID,
+		ReceiverID:     row.ReceiverID,
+		OrganisationID: row.OrganisationID,
+		Message:        row.Message,
+		MessageType:    row.MessageType,
+		FileURL:        row.FileURL,
+		FileName:       row.FileName,
+		FileSize:       row.FileSize,
+		IsSeen:         row.IsSeen,
+		IsDeleted:      row.IsDeleted,
+		ReplyToID:      row.ReplyToID,
+		CreatedAt:      row.CreatedAt,
+		UpdatedAt:      row.UpdatedAt,
+	}
 }
 
-func (r *GormRepository) ListByOrganisation(ctx context.Context, organisationID uint) ([]domain.Chat, error) {
-	// Automatically synchronize/upsert missing employees/managers/boss of that organisation into the chats table.
-	var employees []models.Employee
-	_ = r.db.WithContext(ctx).Preload("User").Where("organisation_id = ?", organisationID).Find(&employees)
-
-	var managers []models.Manager
-	_ = r.db.WithContext(ctx).Preload("User").Where("organisation_id = ?", organisationID).Find(&managers)
-
-	var boss models.Boss
-	bossFound := false
-	if err := r.db.WithContext(ctx).Preload("User").Where("organisation_id = ?", organisationID).First(&boss).Error; err == nil {
-		bossFound = true
+func (r *GormRepository) Create(ctx context.Context, msg *domain.Message) (*domain.Message, error) {
+	m := models.ChatMessage{
+		RoomID:         msg.RoomID,
+		SenderID:       msg.SenderID,
+		ReceiverID:     msg.ReceiverID,
+		OrganisationID: msg.OrganisationID,
+		Message:        msg.Message,
+		MessageType:    msg.MessageType,
+		FileURL:        msg.FileURL,
+		FileName:       msg.FileName,
+		FileSize:       msg.FileSize,
+		IsSeen:         msg.IsSeen,
+		IsDeleted:      msg.IsDeleted,
+		ReplyToID:      msg.ReplyToID,
 	}
-
-	now := time.Now()
-
-	for _, emp := range employees {
-		if emp.User.ID > 0 {
-			var count int64
-			r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", emp.User.ID).Count(&count)
-			if count == 0 {
-				chat := models.Chat{
-					ID:                   emp.User.ID,
-					FirstName:            emp.User.FirstName,
-					LastName:             emp.User.LastName,
-					Email:                emp.User.Email,
-					OrganisationID:       organisationID,
-					LastMessage:          "",
-					LastMessageTimestamp: &now,
-					NumberOfMessage:      0,
-				}
-				r.db.WithContext(ctx).Create(&chat)
-			}
-		}
-	}
-
-	for _, mgr := range managers {
-		if mgr.User.ID > 0 {
-			var count int64
-			r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", mgr.User.ID).Count(&count)
-			if count == 0 {
-				chat := models.Chat{
-					ID:                   mgr.User.ID,
-					FirstName:            mgr.User.FirstName,
-					LastName:             mgr.User.LastName,
-					Email:                mgr.User.Email,
-					OrganisationID:       organisationID,
-					LastMessage:          "",
-					LastMessageTimestamp: &now,
-					NumberOfMessage:      0,
-				}
-				r.db.WithContext(ctx).Create(&chat)
-			}
-		}
-	}
-
-	if bossFound && boss.User.ID > 0 {
-		var count int64
-		r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", boss.User.ID).Count(&count)
-		if count == 0 {
-			chat := models.Chat{
-				ID:                   boss.User.ID,
-				FirstName:            boss.User.FirstName,
-				LastName:             boss.User.LastName,
-				Email:                boss.User.Email,
-				OrganisationID:       organisationID,
-				LastMessage:          "",
-				LastMessageTimestamp: &now,
-				NumberOfMessage:      0,
-			}
-			r.db.WithContext(ctx).Create(&chat)
-		}
-	}
-
-	var rows []models.Chat
-	if err := r.db.WithContext(ctx).Where("organisation_id = ?", organisationID).Order("last_message_timestamp desc nulls last").Find(&rows).Error; err != nil {
+	if err := r.db.WithContext(ctx).Create(&m).Error; err != nil {
 		return nil, err
 	}
-	out := make([]domain.Chat, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, domain.Chat{ID: row.ID, FirstName: row.FirstName, LastName: row.LastName, Email: row.Email, OrganisationID: row.OrganisationID, LastMessage: row.LastMessage, LastMessageTimestamp: row.LastMessageTimestamp, NumberOfMessage: row.NumberOfMessage})
-	}
-	return out, nil
+	res := toDomainMessage(m)
+	return &res, nil
 }
 
-func (r *GormRepository) UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error {
-	var ts *time.Time
-	if at != nil && *at != "" {
-		parsed, err := time.Parse(time.RFC3339, *at)
+func (r *GormRepository) ListByRoomCursor(ctx context.Context, roomID string, cursor string, limit int) (*domain.CursorPage, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+
+	var rows []models.ChatMessage
+	query := r.db.WithContext(ctx).Where("room_id = ? AND is_deleted = false", roomID)
+
+	if cursor != "" {
+		decodedBytes, err := base64.StdEncoding.DecodeString(cursor)
 		if err == nil {
-			ts = &parsed
+			decodedStr := string(decodedBytes)
+			parts := strings.Split(decodedStr, ":")
+			if len(parts) == 2 {
+				id, err1 := strconv.ParseUint(parts[0], 10, 64)
+				_, err2 := strconv.ParseInt(parts[1], 10, 64)
+				if err1 == nil && err2 == nil {
+					// Time is tricky, usually we can just compare unix nano if DB driver supports it, or reconstruct time.
+					// A safe approach in Postgres: (created_at < ?) OR (created_at = ? AND id < ?)
+					// Since we can't easily pass nano time directly to gorm's timestamp, let's just use ID for tiebreaker 
+					// or use string formatting. Let's assume standard ID desc fallback.
+					// We'll just rely on ID for cursor since ID is auto-incrementing and perfectly ordered with time.
+					query = query.Where("id < ?", id)
+				}
+			}
 		}
 	}
-	updates := map[string]any{"last_message": message, "last_message_timestamp": ts}
-	return r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", id).Updates(updates).Error
+
+	// Fetch limit + 1 to check if there's more
+	if err := query.Order("id desc").Limit(limit + 1).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	var out []domain.Message
+	for _, row := range rows {
+		out = append(out, toDomainMessage(row))
+	}
+
+	var nextCursor string
+	if len(rows) > 0 {
+		lastMsg := rows[len(rows)-1]
+		cursorStr := fmt.Sprintf("%d:%d", lastMsg.ID, lastMsg.CreatedAt.UnixNano())
+		nextCursor = base64.StdEncoding.EncodeToString([]byte(cursorStr))
+	}
+
+	return &domain.CursorPage{
+		Messages:   out,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+	}, nil
 }
 
-func (r *GormRepository) IncrementMessageCount(ctx context.Context, id uint) error {
-	return r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", id).UpdateColumn("number_of_message", gorm.Expr("number_of_message + 1")).Error
+func (r *GormRepository) MarkSeen(ctx context.Context, roomID string, receiverID string) error {
+	return r.db.WithContext(ctx).Model(&models.ChatMessage{}).
+		Where("room_id = ? AND receiver_id = ? AND is_seen = false", roomID, receiverID).
+		Update("is_seen", true).Error
 }
-END_FILE:internal/adapters/repository/chats/gorm_repository.go
+
+func (r *GormRepository) MarkSeenUpTo(ctx context.Context, roomID string, receiverID string, upToMessageID uint) error {
+	return r.db.WithContext(ctx).Model(&models.ChatMessage{}).
+		Where("room_id = ? AND receiver_id = ? AND id <= ? AND is_seen = false", roomID, receiverID, upToMessageID).
+		Update("is_seen", true).Error
+}
+
+func (r *GormRepository) DeleteMessage(ctx context.Context, messageID uint, requestingUserID string) error {
+	return r.db.WithContext(ctx).Model(&models.ChatMessage{}).
+		Where("id = ? AND sender_id = ?", messageID, requestingUserID).
+		Updates(map[string]interface{}{
+			"is_deleted": true,
+			"message":    "[Message deleted]",
+		}).Error
+}
+
+func (r *GormRepository) GetByID(ctx context.Context, id uint) (*domain.Message, error) {
+	var m models.ChatMessage
+	if err := r.db.WithContext(ctx).First(&m, id).Error; err != nil {
+		return nil, err
+	}
+	res := toDomainMessage(m)
+	return &res, nil
+}
+END_FILE:internal/adapters/repository/messages/gorm_repository.go
 # path: internal/platform/database/models/people_models.go | lang: go | tokens: 1079 | size: 4319
 BEGIN_FILE:internal/platform/database/models/people_models.go
 package models
@@ -9188,6 +9510,122 @@ func toDomain(m *models.Leave) *leave.Leave {
 	}
 }
 END_FILE:internal/adapters/repository/leave/gorm_repository.go
+# path: internal/adapters/http/callstate/handler.go | lang: go | tokens: 814 | size: 3256
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/callstate/handler.go
+package callstate
+
+import (
+	"fmt"
+	"net/http"
+	domain "server/internal/domain/callstate"
+	ws "server/internal/platform/websocket"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc        domain.UseCase
+	wsManager *ws.Manager
+}
+
+func NewHandler(uc domain.UseCase, wsManager *ws.Manager) *Handler {
+	return &Handler{uc: uc, wsManager: wsManager}
+}
+
+func (h *Handler) Upsert(c *gin.Context) {
+	var state domain.State
+	if err := c.BindJSON(&state); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if err := h.uc.CreateOrUpdate(c.Request.Context(), &state); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save call state", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"call": state})
+}
+
+func (h *Handler) Get(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
+		return
+	}
+	state, err := h.uc.Get(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Call state not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"call": state})
+}
+
+func (h *Handler) Offer(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
+		return
+	}
+	var req struct {
+		CallingID        string `json:"calling_id"`
+		CallingFirstName string `json:"calling_first_name"`
+		CallingLastName  string `json:"calling_last_name"`
+		Offer            string `json:"offer"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	if err := h.uc.CreateOffer(c.Request.Context(), uint(id), req.CallingID, req.CallingFirstName, req.CallingLastName, req.Offer); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create offer", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "offer updated"})
+}
+
+func (h *Handler) End(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
+		return
+	}
+	if err := h.uc.EndCall(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to end call", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "call ended"})
+}
+
+// InitiateCall sends a call invitation via WebSocket
+func (h *Handler) InitiateCall(c *gin.Context) {
+	var req struct {
+		TargetUserID string `json:"target_user_id"`
+		Type         string `json:"type"` // "audio" or "video"
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	userIDVal, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	userIDStr := fmt.Sprintf("%d", userIDVal.(uint))
+
+	if h.wsManager != nil {
+		payload := map[string]interface{}{
+			"caller_id": userIDStr,
+			"type":      req.Type,
+		}
+		_ = h.wsManager.SendToUser(req.TargetUserID, "call_incoming", payload)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "call initiated"})
+}
+END_FILE:internal/adapters/http/callstate/handler.go
 # path: internal/adapters/http/teams/handler.go | lang: go | tokens: 806 | size: 3227
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/teams/handler.go
@@ -9422,6 +9860,190 @@ func (m *Milestone) UnmarshalJSON(data []byte) error {
 	return nil
 }
 END_FILE:internal/domain/projects/entity.go
+# path: internal/adapters/http/messages/handler.go | lang: go | tokens: 748 | size: 2992
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/messages/handler.go
+package messages
+
+import (
+	"fmt"
+	"net/http"
+	domain "server/internal/domain/messages"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct{ uc domain.UseCase }
+
+func NewHandler(uc domain.UseCase) *Handler { return &Handler{uc: uc} }
+
+func (h *Handler) GetMessages(c *gin.Context) {
+	roomID := c.Param("room_id")
+	if roomID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "room_id is required"})
+		return
+	}
+
+	_, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	cursor := c.Query("cursor")
+	limitStr := c.Query("limit")
+	limit := 30
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	page, err := h.uc.GetMessages(c.Request.Context(), roomID, cursor, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		return
+	}
+	
+	c.JSON(http.StatusOK, page)
+}
+
+func (h *Handler) SendMessage(c *gin.Context) {
+	var msg domain.Message
+	if err := c.BindJSON(&msg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	userIDVal, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	senderIDStr := fmt.Sprintf("%d", userIDVal.(uint))
+
+	orgIDVal, _ := c.Get("organisationID")
+	orgID := orgIDVal.(uint)
+
+	// Enforce sender id and organisation
+	msg.SenderID = senderIDStr
+	msg.OrganisationID = orgID
+
+	createdMsg, err := h.uc.SendMessage(c.Request.Context(), &msg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, createdMsg)
+}
+
+func (h *Handler) MarkSeen(c *gin.Context) {
+	roomID := c.Param("room_id")
+	if roomID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "room_id is required"})
+		return
+	}
+
+	userIDVal, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	userIDStr := fmt.Sprintf("%d", userIDVal.(uint))
+
+	if err := h.uc.MarkSeen(c.Request.Context(), roomID, userIDStr); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark seen"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Marked seen"})
+}
+
+func (h *Handler) DeleteMessage(c *gin.Context) {
+	msgIDStr := c.Param("id")
+	msgID, err := strconv.ParseUint(msgIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message id"})
+		return
+	}
+
+	userIDVal, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	userIDStr := fmt.Sprintf("%d", userIDVal.(uint))
+
+	if err := h.uc.DeleteMessage(c.Request.Context(), uint(msgID), userIDStr); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete message"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Message deleted"})
+}
+END_FILE:internal/adapters/http/messages/handler.go
+# path: internal/platform/database/models/chat_models.go | lang: go | tokens: 694 | size: 2776
+# imports: time
+BEGIN_FILE:internal/platform/database/models/chat_models.go
+package models
+
+import "time"
+
+type Chat struct {
+	ID             uint       `gorm:"primaryKey" json:"id"`
+	OrganisationID uint       `gorm:"index;not null" json:"organisation_id"`
+	Name           string     `gorm:"size:500" json:"name"`
+	IsGroup        bool       `gorm:"default:false" json:"is_group"`
+	CreatedBy      *uint      `json:"created_by"`
+	LastMessage    string     `gorm:"type:text" json:"last_message"`
+	LastMessageAt  *time.Time `json:"last_message_at"`
+	MessageCount   int        `gorm:"default:0" json:"message_count"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+type ChatParticipant struct {
+	ChatID            uint      `gorm:"primaryKey" json:"chat_id"`
+	UserID            uint      `gorm:"primaryKey" json:"user_id"`
+	UnreadCount       int       `gorm:"default:0" json:"unread_count"`
+	LastReadMessageID *uint     `json:"last_read_message_id"`
+	JoinedAt          time.Time `gorm:"default:now()" json:"joined_at"`
+}
+
+type ChatMessage struct {
+	ID             uint       `gorm:"primaryKey" json:"id"`
+	RoomID         string     `gorm:"size:255;index;not null" json:"room_id"`
+	SenderID       string     `gorm:"size:255;not null" json:"sender_id"`
+	ReceiverID     string     `gorm:"size:255;not null" json:"receiver_id"`
+	OrganisationID uint       `gorm:"index;not null" json:"organisation_id"`
+	Message        string     `gorm:"type:text;not null" json:"message"`
+	MessageType    string     `gorm:"size:50;not null;default:'text'" json:"message_type"`
+	FileURL        *string    `gorm:"type:text" json:"file_url"`
+	FileName       *string    `gorm:"size:500" json:"file_name"`
+	FileSize       *int64     `json:"file_size"`
+	IsSeen         bool       `gorm:"default:false" json:"is_seen"`
+	IsDeleted      bool       `gorm:"default:false" json:"is_deleted"`
+	ReplyToID      *uint      `json:"reply_to_id"`
+	CreatedAt      time.Time  `gorm:"index;default:now()" json:"created_at"`
+	UpdatedAt      time.Time  `gorm:"default:now()" json:"updated_at"`
+}
+
+
+type CallState struct {
+	ID               uint       `gorm:"primaryKey;autoIncrement:false" json:"id"`
+	FirstName        string     `gorm:"size:100" json:"first_name"`
+	LastName         string     `gorm:"size:100" json:"last_name"`
+	Email            string     `gorm:"size:255" json:"email"`
+	OrganisationID   uint       `gorm:"index;not null" json:"organisation_id"`
+	InCall           bool       `gorm:"default:false" json:"in_call"`
+	LastCall         *time.Time `json:"last_call"`
+	CallingID        *string    `gorm:"size:50" json:"calling_id"`
+	CallingFirstName *string    `gorm:"size:100" json:"calling_first_name"`
+	CallingLastName  *string    `gorm:"size:100" json:"calling_last_name"`
+	Offer            *string    `gorm:"type:text" json:"offer"`
+}
+END_FILE:internal/platform/database/models/chat_models.go
 # path: internal/usecase/projects/usecase.go | lang: go | tokens: 666 | size: 2667
 # functions: NewService
 BEGIN_FILE:internal/usecase/projects/usecase.go
@@ -9516,127 +10138,111 @@ func (s *service) GetMilestoneByID(ctx context.Context, id uint) (*domain.Milest
 }
 
 END_FILE:internal/usecase/projects/usecase.go
-# path: internal/platform/websocket/hub.go | lang: go | tokens: 655 | size: 2620
-# functions: NewHub
-BEGIN_FILE:internal/platform/websocket/hub.go
-package websocket
+# path: internal/platform/database/init.go | lang: go | tokens: 649 | size: 2599
+# functions: Init, initDB, PerformMigrations
+BEGIN_FILE:internal/platform/database/init.go
+package database
 
 import (
-	"encoding/json"
+	"fmt"
 	"log"
-	"sync"
+	"os"
+	"server/internal/platform/database/models"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
-// PresenceMessage is sent to clients when the list of online users changes
-type PresenceMessage struct {
-	OnlineUsers []uint `json:"online_users"`
+var DB *gorm.DB
+
+func Init() {
+	DB = initDB()
 }
 
-type Hub struct {
-	// Registered clients.
-	Clients map[*Client]bool
+func initDB() *gorm.DB {
+	host := os.Getenv("DB_HOST")
+	user := os.Getenv("DB_USER")
+	password := os.Getenv("DB_PASSWORD")
+	dbname := os.Getenv("DB_NAME")
+	port := os.Getenv("DB_PORT")
 
-	// Register requests from the clients.
-	Register chan *Client
-
-	// Unregister requests from clients.
-	Unregister chan *Client
-
-	// Mutex for safe concurrent map access.
-	mu sync.RWMutex
-}
-
-func NewHub() *Hub {
-	return &Hub{
-		Clients:    make(map[*Client]bool),
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
-	}
-}
-
-func (h *Hub) Run() {
-	for {
-		select {
-		case client := <-h.Register:
-			h.mu.Lock()
-			h.Clients[client] = true
-			h.mu.Unlock()
-			log.Printf("Client registered: user %d, employee %d, org %d", client.UserID, client.EmployeeID, client.OrganisationID)
-			h.broadcastPresence(client.OrganisationID)
-
-		case client := <-h.Unregister:
-			h.mu.Lock()
-			if _, ok := h.Clients[client]; ok {
-				delete(h.Clients, client)
-				close(client.Send)
-				log.Printf("Client unregistered: user %d, employee %d, org %d", client.UserID, client.EmployeeID, client.OrganisationID)
-				h.mu.Unlock()
-				h.broadcastPresence(client.OrganisationID)
-			} else {
-				h.mu.Unlock()
-			}
-		}
-	}
-}
-
-// GetOnlineUsers returns a list of online user IDs in an organisation
-func (h *Hub) GetOnlineUsers(orgID uint) []uint {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	userSet := make(map[uint]bool)
-	for client := range h.Clients {
-		if client.OrganisationID == orgID {
-			userSet[client.UserID] = true
-		}
+	if host == "" || user == "" || password == "" || dbname == "" || port == "" {
+		log.Fatalf("Database configuration missing. Please check environment variables.")
 	}
 
-	online := make([]uint, 0, len(userSet))
-	for userID := range userSet {
-		online = append(online, userID)
-	}
-	return online
-}
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable", host, user, password, dbname, port)
 
-// broadcastPresence broadcasts the list of online users to all clients in the organisation
-func (h *Hub) broadcastPresence(orgID uint) {
-	onlineUsers := h.GetOnlineUsers(orgID)
-	msg, err := json.Marshal(PresenceMessage{OnlineUsers: onlineUsers})
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Info),
+	})
 	if err != nil {
-		log.Printf("Error marshaling presence message: %v", err)
-		return
+		panic("failed to connect database")
 	}
-
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	for client := range h.Clients {
-		if client.OrganisationID == orgID {
-			select {
-			case client.Send <- msg:
-			default:
-				// If send buffer is full, skip
-			}
-		}
-	}
+	return db
 }
 
-// BroadcastToUser broadcasts a message to all active sessions of a specific user
-func (h *Hub) BroadcastToUser(userID uint, message []byte) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	for client := range h.Clients {
-		if client.UserID == userID {
-			select {
-			case client.Send <- message:
-			default:
-				// If send buffer is full, skip
-			}
-		}
+func PerformMigrations() error {
+	err := DB.AutoMigrate(
+		&models.Organisation{},
+		&models.UserModel{},
+		&models.Task{},
+		&models.File{},
+		&models.Employee{},
+		&models.Manager{},
+		&models.Boss{},
+		&models.Attendance{},
+		&models.Project{},
+		&models.Team{},
+		&models.TeamMember{},
+		&models.Notification{},
+		&models.Chat{},
+		&models.ChatMessage{},
+		&models.ChatParticipant{},
+		&models.CallState{},
+		&models.TaskComment{},
+		&models.TaskAttachment{},
+		&models.OnboardingProgress{},
+		&models.Leave{},
+		&models.Milestone{},
+		&models.LeavePolicy{},
+		&models.AttendancePolicy{},
+		&models.RolePermissions{},
+		&models.TaskType{},
+		&models.TaskActivity{},
+		&models.WorkSchedule{},
+		&models.AuditLog{},
+		&models.Invite{},
+		&models.ResourceCollection{},
+		&models.ResourceRecord{},
+		&models.ResourceRecordHistory{},
+		&models.ResourceRecordAttachment{},
+		&models.ResearchEntry{},
+		&models.ResearchFolder{},
+		&models.ResearchDocument{},
+		&models.ResearchDocumentVersion{},
+		&models.ResearchFile{},
+		&models.ResearchReference{},
+		&models.ResearchCollaborator{},
+		&models.ResearchActivity{},
+		&models.PeopleContact{},
+		&models.PeopleInteraction{},
+		&models.PeoplePipelineStage{},
+		&models.PeopleList{},
+		&models.PeopleListContact{},
+	)
+	if err != nil {
+		return err
 	}
+
+	// Create GIN index and search helper indexes for Resource Collection and Records
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_data ON resource_records USING GIN (data)`)
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_collection_org ON resource_records (collection_id, organisation_id)`)
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_collections_org ON resource_collections (organisation_id)`)
+
+	return nil
 }
-END_FILE:internal/platform/websocket/hub.go
+END_FILE:internal/platform/database/init.go
 # path: internal/adapters/repository/attendance/gorm_repository.go | lang: go | tokens: 644 | size: 2577
 # functions: NewGormRepository, toModel, toDomain, toDomainList
 BEGIN_FILE:internal/adapters/repository/attendance/gorm_repository.go
@@ -9872,110 +10478,6 @@ func (s *service) handleEndCall(room *Room, ws *websocket.Conn) {
 	}
 }
 END_FILE:internal/usecase/calls/usecase.go
-# path: internal/platform/database/init.go | lang: go | tokens: 642 | size: 2570
-# functions: Init, initDB, PerformMigrations
-BEGIN_FILE:internal/platform/database/init.go
-package database
-
-import (
-	"fmt"
-	"log"
-	"os"
-	"server/internal/platform/database/models"
-
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-)
-
-var DB *gorm.DB
-
-func Init() {
-	DB = initDB()
-}
-
-func initDB() *gorm.DB {
-	host := os.Getenv("DB_HOST")
-	user := os.Getenv("DB_USER")
-	password := os.Getenv("DB_PASSWORD")
-	dbname := os.Getenv("DB_NAME")
-	port := os.Getenv("DB_PORT")
-
-	if host == "" || user == "" || password == "" || dbname == "" || port == "" {
-		log.Fatalf("Database configuration missing. Please check environment variables.")
-	}
-
-	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable", host, user, password, dbname, port)
-
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
-	})
-	if err != nil {
-		panic("failed to connect database")
-	}
-	return db
-}
-
-func PerformMigrations() error {
-	err := DB.AutoMigrate(
-		&models.Organisation{},
-		&models.UserModel{},
-		&models.Task{},
-		&models.File{},
-		&models.Employee{},
-		&models.Manager{},
-		&models.Boss{},
-		&models.Attendance{},
-		&models.Project{},
-		&models.Team{},
-		&models.TeamMember{},
-		&models.Notification{},
-		&models.Chat{},
-		&models.ChatMessage{},
-		&models.CallState{},
-		&models.TaskComment{},
-		&models.TaskAttachment{},
-		&models.OnboardingProgress{},
-		&models.Leave{},
-		&models.Milestone{},
-		&models.LeavePolicy{},
-		&models.AttendancePolicy{},
-		&models.RolePermissions{},
-		&models.TaskType{},
-		&models.TaskActivity{},
-		&models.WorkSchedule{},
-		&models.AuditLog{},
-		&models.Invite{},
-		&models.ResourceCollection{},
-		&models.ResourceRecord{},
-		&models.ResourceRecordHistory{},
-		&models.ResourceRecordAttachment{},
-		&models.ResearchEntry{},
-		&models.ResearchFolder{},
-		&models.ResearchDocument{},
-		&models.ResearchDocumentVersion{},
-		&models.ResearchFile{},
-		&models.ResearchReference{},
-		&models.ResearchCollaborator{},
-		&models.ResearchActivity{},
-		&models.PeopleContact{},
-		&models.PeopleInteraction{},
-		&models.PeoplePipelineStage{},
-		&models.PeopleList{},
-		&models.PeopleListContact{},
-	)
-	if err != nil {
-		return err
-	}
-
-	// Create GIN index and search helper indexes for Resource Collection and Records
-	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_data ON resource_records USING GIN (data)`)
-	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_collection_org ON resource_records (collection_id, organisation_id)`)
-	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_collections_org ON resource_collections (organisation_id)`)
-
-	return nil
-}
-END_FILE:internal/platform/database/init.go
 # path: internal/adapters/http/organisation/handler.go | lang: go | tokens: 631 | size: 2524
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/organisation/handler.go
@@ -10110,6 +10612,92 @@ type Organisation struct {
 	BossID             uint       `gorm:"column:boss_id;index;foreignKey:UserID;references:ID" json:"boss_id"`
 }
 END_FILE:internal/platform/database/models/organisation_model.go
+# path: internal/usecase/messages/usecase.go | lang: go | tokens: 621 | size: 2484
+# functions: NewService
+BEGIN_FILE:internal/usecase/messages/usecase.go
+package messages
+
+import (
+	"context"
+	"errors"
+	"strconv"
+	"time"
+
+	chatDomain "server/internal/domain/chats"
+	domain "server/internal/domain/messages"
+	ws "server/internal/platform/websocket"
+)
+
+var ErrInvalidUserID = errors.New("invalid user id")
+
+type service struct {
+	repo      domain.Repository
+	chatRepo  chatDomain.Repository
+	wsManager *ws.Manager
+}
+
+func NewService(repo domain.Repository, chatRepo chatDomain.Repository, wsManager *ws.Manager) domain.UseCase {
+	return &service{repo: repo, chatRepo: chatRepo, wsManager: wsManager}
+}
+
+func (s *service) GetMessages(ctx context.Context, roomID string, cursor string, limit int) (*domain.CursorPage, error) {
+	return s.repo.ListByRoomCursor(ctx, roomID, cursor, limit)
+}
+
+func (s *service) SendMessage(ctx context.Context, msg *domain.Message) (*domain.Message, error) {
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now().UTC()
+	}
+
+	createdMsg, err := s.repo.Create(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update chat unread count and last message
+	chatID, err := strconv.ParseUint(createdMsg.RoomID, 10, 64)
+	if err == nil {
+		ts := createdMsg.CreatedAt.UTC().Format(time.RFC3339)
+		_ = s.chatRepo.UpdateLastMessage(ctx, uint(chatID), createdMsg.Message, &ts)
+		_ = s.chatRepo.IncrementMessageCount(ctx, uint(chatID))
+
+		// Get chat participants to push notification
+		participants, err := s.chatRepo.GetParticipants(ctx, uint(chatID))
+		if err == nil {
+			for _, p := range participants {
+				participantUserIDStr := strconv.FormatUint(uint64(p.UserID), 10)
+				if participantUserIDStr != createdMsg.SenderID {
+					_ = s.chatRepo.UpdateUnreadCount(ctx, uint(chatID), p.UserID, 1)
+					
+					// Push via WebSocket
+					if s.wsManager != nil {
+						_ = s.wsManager.SendToUser(participantUserIDStr, "new_message", createdMsg)
+					}
+				}
+			}
+		}
+	}
+
+	return createdMsg, nil
+}
+
+func (s *service) MarkSeen(ctx context.Context, roomID string, receiverID string) error {
+	err := s.repo.MarkSeen(ctx, roomID, receiverID)
+	if err == nil {
+		// Reset unread count for this user in this chat
+		chatID, parseErr := strconv.ParseUint(roomID, 10, 64)
+		userID, parseErr2 := strconv.ParseUint(receiverID, 10, 64)
+		if parseErr == nil && parseErr2 == nil {
+			_ = s.chatRepo.ResetUnreadCount(ctx, uint(chatID), uint(userID))
+		}
+	}
+	return err
+}
+
+func (s *service) DeleteMessage(ctx context.Context, messageID uint, requestingUserID string) error {
+	return s.repo.DeleteMessage(ctx, messageID, requestingUserID)
+}
+END_FILE:internal/usecase/messages/usecase.go
 # path: internal/adapters/http/task_attachments/handler.go | lang: go | tokens: 621 | size: 2486
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/task_attachments/handler.go
@@ -10531,86 +11119,6 @@ func toDomain(m *models.UserModel) *domain.User {
 	}
 }
 END_FILE:internal/adapters/repository/auth/gorm_repository.go
-# path: internal/adapters/http/callstate/handler.go | lang: go | tokens: 583 | size: 2334
-# functions: NewHandler
-BEGIN_FILE:internal/adapters/http/callstate/handler.go
-package callstate
-
-import (
-	"net/http"
-	domain "server/internal/domain/callstate"
-	"strconv"
-
-	"github.com/gin-gonic/gin"
-)
-
-type Handler struct{ uc domain.UseCase }
-
-func NewHandler(uc domain.UseCase) *Handler { return &Handler{uc: uc} }
-
-func (h *Handler) Upsert(c *gin.Context) {
-	var state domain.State
-	if err := c.BindJSON(&state); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-	if err := h.uc.CreateOrUpdate(c.Request.Context(), &state); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save call state", "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"call": state})
-}
-
-func (h *Handler) Get(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
-		return
-	}
-	state, err := h.uc.Get(c.Request.Context(), uint(id))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Call state not found"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"call": state})
-}
-
-func (h *Handler) Offer(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
-		return
-	}
-	var req struct {
-		CallingID        string `json:"calling_id"`
-		CallingFirstName string `json:"calling_first_name"`
-		CallingLastName  string `json:"calling_last_name"`
-		Offer            string `json:"offer"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-	if err := h.uc.CreateOffer(c.Request.Context(), uint(id), req.CallingID, req.CallingFirstName, req.CallingLastName, req.Offer); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create offer", "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "offer updated"})
-}
-
-func (h *Handler) End(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
-		return
-	}
-	if err := h.uc.EndCall(c.Request.Context(), uint(id)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to end call", "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "call ended"})
-}
-END_FILE:internal/adapters/http/callstate/handler.go
 # path: internal/adapters/http/task_comments/handler.go | lang: go | tokens: 581 | size: 2326
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/task_comments/handler.go
@@ -10708,6 +11216,102 @@ func (h *Handler) DeleteComment(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Comment deleted successfully"})
 }
 END_FILE:internal/adapters/http/task_comments/handler.go
+# path: internal/adapters/http/chats/handler.go | lang: go | tokens: 580 | size: 2323
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/chats/handler.go
+package chats
+
+import (
+	"net/http"
+	domain "server/internal/domain/chats"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct{ uc domain.UseCase }
+
+func NewHandler(uc domain.UseCase) *Handler { return &Handler{uc: uc} }
+
+func (h *Handler) Create(c *gin.Context) {
+	var chat domain.Chat
+	if err := c.BindJSON(&chat); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	userIDVal, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	orgIDVal, _ := c.Get("organisationID")
+
+	chat.CreatedBy = userIDVal.(uint)
+	chat.OrganisationID = orgIDVal.(uint)
+
+	if err := h.uc.CreateChat(c.Request.Context(), &chat); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create chat", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, chat)
+}
+
+func (h *Handler) List(c *gin.Context) {
+	orgIDVal, ok := c.Get("organisationID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Organisation not found"})
+		return
+	}
+
+	userIDVal, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	chats, err := h.uc.GetUserChats(c.Request.Context(), userIDVal.(uint), orgIDVal.(uint))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chats"})
+		return
+	}
+
+	// if it returns nil, it is empty slice
+	if chats == nil {
+		chats = []domain.Chat{}
+	}
+	c.JSON(http.StatusOK, gin.H{"chats": chats})
+}
+
+func (h *Handler) GetOrCreateDM(c *gin.Context) {
+	peerIDStr := c.Param("peer_id")
+	peerID, err := strconv.ParseUint(peerIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid peer ID"})
+		return
+	}
+
+	orgIDVal, ok := c.Get("organisationID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Organisation not found"})
+		return
+	}
+
+	userIDVal, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	chat, err := h.uc.GetOrCreateDM(c.Request.Context(), userIDVal.(uint), uint(peerID), orgIDVal.(uint))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get or create DM"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"chat": chat})
+}
+END_FILE:internal/adapters/http/chats/handler.go
 # path: internal/domain/resources/usecase.go | lang: go | tokens: 577 | size: 2311
 # imports: context
 BEGIN_FILE:internal/domain/resources/usecase.go
@@ -10823,7 +11427,7 @@ func ValidateToken() gin.HandlerFunc {
 	}
 }
 END_FILE:internal/platform/middlewares/auth_validator_middleware.go
-# path: internal/platform/websocket/client.go | lang: go | tokens: 574 | size: 2298
+# path: internal/platform/websocket/client.go | lang: go | tokens: 562 | size: 2250
 BEGIN_FILE:internal/platform/websocket/client.go
 package websocket
 
@@ -10868,9 +11472,7 @@ type Client struct {
 	Send chan []byte
 
 	// Client metadata.
-	UserID         uint
-	EmployeeID     uint
-	OrganisationID uint
+	UserID string
 }
 
 func (c *Client) ReadPump() {
@@ -11015,95 +11617,6 @@ func (s *service) GetTaskByTitle(ctx context.Context, title string) ([]domain.Ta
 	return s.repo.GetByTitle(ctx, title)
 }
 END_FILE:internal/usecase/tasks/usecase.go
-# path: internal/adapters/http/notifications/ws_handler.go | lang: go | tokens: 550 | size: 2202
-BEGIN_FILE:internal/adapters/http/notifications/ws_handler.go
-package notifications
-
-import (
-	"log"
-	"net/http"
-	"server/internal/platform/miscallenous"
-	"server/internal/platform/websocket"
-
-	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
-)
-
-func (h *Handler) Upgrade(c *gin.Context) {
-	// Extract the token from the "token" query parameter
-	tokenString := c.Query("token")
-	if tokenString == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing token"})
-		return
-	}
-
-	// Decode and validate the token
-	decodedToken, err := miscallenous.DecodeJWTToken(tokenString)
-	if err != nil || !decodedToken.Valid {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
-	}
-
-	var userID uint
-	var organisationID uint
-	var employeeID uint
-
-	if claims, ok := decodedToken.Claims.(jwt.MapClaims); ok {
-		if sub, ok := claims["sub"].(float64); ok {
-			userID = uint(sub)
-		}
-		if emp, ok := claims["employee"].(map[string]interface{}); ok {
-			if orgID, ok := emp["organisation_id"].(float64); ok {
-				organisationID = uint(orgID)
-			}
-			if id, ok := emp["id"].(float64); ok {
-				employeeID = uint(id)
-			}
-		} else if mgr, ok := claims["manager"].(map[string]interface{}); ok {
-			if orgID, ok := mgr["organisation_id"].(float64); ok {
-				organisationID = uint(orgID)
-			}
-			if id, ok := mgr["id"].(float64); ok {
-				employeeID = uint(id)
-			}
-		} else if boss, ok := claims["boss"].(map[string]interface{}); ok {
-			if orgID, ok := boss["organisation_id"].(float64); ok {
-				organisationID = uint(orgID)
-			}
-			if id, ok := boss["id"].(float64); ok {
-				employeeID = uint(id)
-			}
-		}
-	}
-
-	if userID == 0 {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID in token"})
-		return
-	}
-
-	// Upgrade the connection to WebSocket
-	conn, err := websocket.Upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		log.Printf("Failed to upgrade connection: %v", err)
-		return
-	}
-
-	client := &websocket.Client{
-		Hub:            h.hub,
-		Conn:           conn,
-		Send:           make(chan []byte, 256),
-		UserID:         userID,
-		EmployeeID:     employeeID,
-		OrganisationID: organisationID,
-	}
-
-	client.Hub.Register <- client
-
-	// Start read/write pumps in goroutines
-	go client.WritePump()
-	go client.ReadPump()
-}
-END_FILE:internal/adapters/http/notifications/ws_handler.go
 # path: public/app.js | lang: javascript | tokens: 549 | size: 2196
 # functions: startWebRTC
 BEGIN_FILE:public/app.js
@@ -11710,48 +12223,6 @@ type ResearchEntry struct {
 	Collaborators []ResearchCollaborator `gorm:"foreignKey:ResearchID" json:"collaborators"`
 }
 END_FILE:internal/platform/database/models/research_model.go
-# path: internal/platform/database/models/chat_models.go | lang: go | tokens: 467 | size: 1870
-# imports: time
-BEGIN_FILE:internal/platform/database/models/chat_models.go
-package models
-
-import "time"
-
-type Chat struct {
-	ID                   uint       `gorm:"primaryKey;autoIncrement:false" json:"id"`
-	FirstName            string     `gorm:"size:100;not null" json:"first_name"`
-	LastName             string     `gorm:"size:100" json:"last_name"`
-	Email                string     `gorm:"size:255" json:"email"`
-	OrganisationID       uint       `gorm:"index;not null" json:"organisation_id"`
-	LastMessage          string     `gorm:"type:text" json:"last_message"`
-	LastMessageTimestamp *time.Time `json:"last_message_timestamp"`
-	NumberOfMessage      int        `gorm:"default:0" json:"number_of_message"`
-}
-
-type ChatMessage struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	RoomID     string    `gorm:"size:255;index;not null" json:"room_id"`
-	SenderID   string    `gorm:"size:50;index;not null" json:"sender_id"`
-	ReceiverID string    `gorm:"size:50;index;not null" json:"receiver_id"`
-	Message    string    `gorm:"type:text;not null" json:"message"`
-	IsSeen     bool      `gorm:"default:false" json:"is_seen"`
-	TimeStamp  time.Time `gorm:"index" json:"time_stamp"`
-}
-
-type CallState struct {
-	ID               uint       `gorm:"primaryKey;autoIncrement:false" json:"id"`
-	FirstName        string     `gorm:"size:100" json:"first_name"`
-	LastName         string     `gorm:"size:100" json:"last_name"`
-	Email            string     `gorm:"size:255" json:"email"`
-	OrganisationID   uint       `gorm:"index;not null" json:"organisation_id"`
-	InCall           bool       `gorm:"default:false" json:"in_call"`
-	LastCall         *time.Time `json:"last_call"`
-	CallingID        *string    `gorm:"size:50" json:"calling_id"`
-	CallingFirstName *string    `gorm:"size:100" json:"calling_first_name"`
-	CallingLastName  *string    `gorm:"size:100" json:"calling_last_name"`
-	Offer            *string    `gorm:"type:text" json:"offer"`
-}
-END_FILE:internal/platform/database/models/chat_models.go
 # path: internal/adapters/http/attendance/handler.go | lang: go | tokens: 465 | size: 1860
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/attendance/handler.go
@@ -11937,6 +12408,94 @@ func (h *Handler) MarkAllRead(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "all notifications marked as read"})
 }
 END_FILE:internal/adapters/http/notifications/handler.go
+# path: internal/platform/websocket/hub.go | lang: go | tokens: 420 | size: 1683
+# functions: NewHub
+BEGIN_FILE:internal/platform/websocket/hub.go
+package websocket
+
+import (
+	"log"
+	"sync"
+)
+
+// PresenceMessage is sent to clients when the list of online users changes
+type PresenceMessage struct {
+	OnlineUsers []uint `json:"online_users"`
+}
+
+type HubMessage struct {
+	TargetUserID string
+	Payload      []byte
+}
+
+type Hub struct {
+	// Registered clients mapped by userID (string)
+	Clients map[string]*Client
+
+	// Register requests from the clients.
+	Register chan *Client
+
+	// Unregister requests from clients.
+	Unregister chan *Client
+
+	// Broadcast requests
+	Broadcast chan *HubMessage
+
+	// Mutex for safe concurrent map access.
+	mu sync.RWMutex
+}
+
+func NewHub() *Hub {
+	return &Hub{
+		Clients:    make(map[string]*Client),
+		Register:   make(chan *Client),
+		Unregister: make(chan *Client),
+		Broadcast:  make(chan *HubMessage),
+	}
+}
+
+func (h *Hub) Run() {
+	for {
+		select {
+		case client := <-h.Register:
+			h.mu.Lock()
+			h.Clients[client.UserID] = client
+			h.mu.Unlock()
+			log.Printf("Client registered: user %s", client.UserID)
+
+		case client := <-h.Unregister:
+			h.mu.Lock()
+			if _, ok := h.Clients[client.UserID]; ok {
+				delete(h.Clients, client.UserID)
+				close(client.Send)
+				log.Printf("Client unregistered: user %s", client.UserID)
+			}
+			h.mu.Unlock()
+
+		case message := <-h.Broadcast:
+			h.mu.RLock()
+			if client, ok := h.Clients[message.TargetUserID]; ok {
+				select {
+				case client.Send <- message.Payload:
+				default:
+					h.mu.RUnlock()
+					h.Unregister <- client
+					h.mu.RLock()
+				}
+			}
+			h.mu.RUnlock()
+		}
+	}
+}
+
+// IsOnline checks if a user is currently connected
+func (h *Hub) IsOnline(userID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	_, ok := h.Clients[userID]
+	return ok
+}
+END_FILE:internal/platform/websocket/hub.go
 # path: internal/adapters/http/search/handler.go | lang: go | tokens: 419 | size: 1678
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/search/handler.go
@@ -12281,48 +12840,6 @@ func (h *Handler) GetFile(c *gin.Context) {
 	c.Data(http.StatusOK, file.FileType, file.Data)
 }
 END_FILE:internal/adapters/http/files/handler.go
-# path: internal/adapters/repository/messages/gorm_repository.go | lang: go | tokens: 358 | size: 1435
-# functions: NewGormRepository
-BEGIN_FILE:internal/adapters/repository/messages/gorm_repository.go
-package messages
-
-import (
-	"context"
-	domain "server/internal/domain/messages"
-	"server/internal/platform/database/models"
-
-	"gorm.io/gorm"
-)
-
-type GormRepository struct{ db *gorm.DB }
-
-func NewGormRepository(db *gorm.DB) *GormRepository { return &GormRepository{db: db} }
-
-func (r *GormRepository) Create(ctx context.Context, msg *domain.Message) error {
-	m := models.ChatMessage{RoomID: msg.RoomID, SenderID: msg.SenderID, ReceiverID: msg.ReceiverID, Message: msg.Message, IsSeen: msg.IsSeen, TimeStamp: msg.TimeStamp}
-	if err := r.db.WithContext(ctx).Create(&m).Error; err != nil {
-		return err
-	}
-	msg.ID = m.ID
-	return nil
-}
-
-func (r *GormRepository) ListByRoom(ctx context.Context, roomID string) ([]domain.Message, error) {
-	var rows []models.ChatMessage
-	if err := r.db.WithContext(ctx).Where("room_id = ?", roomID).Order("time_stamp asc").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	out := make([]domain.Message, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, domain.Message{ID: row.ID, RoomID: row.RoomID, SenderID: row.SenderID, ReceiverID: row.ReceiverID, Message: row.Message, IsSeen: row.IsSeen, TimeStamp: row.TimeStamp})
-	}
-	return out, nil
-}
-
-func (r *GormRepository) MarkSeen(ctx context.Context, roomID string, receiverID string) error {
-	return r.db.WithContext(ctx).Model(&models.ChatMessage{}).Where("room_id = ? AND receiver_id = ?", roomID, receiverID).Update("is_seen", true).Error
-}
-END_FILE:internal/adapters/repository/messages/gorm_repository.go
 # path: internal/usecase/notifications/usecase.go | lang: go | tokens: 355 | size: 1421
 # functions: NewService
 BEGIN_FILE:internal/usecase/notifications/usecase.go
@@ -12380,59 +12897,6 @@ func (s *service) MarkAllNotificationsRead(ctx context.Context, userID uint) err
 }
 
 END_FILE:internal/usecase/notifications/usecase.go
-# path: internal/adapters/http/messages/handler.go | lang: go | tokens: 355 | size: 1423
-# functions: NewHandler
-BEGIN_FILE:internal/adapters/http/messages/handler.go
-package messages
-
-import (
-	"net/http"
-	domain "server/internal/domain/messages"
-	"strconv"
-
-	"github.com/gin-gonic/gin"
-)
-
-type Handler struct{ uc domain.UseCase }
-
-func NewHandler(uc domain.UseCase) *Handler { return &Handler{uc: uc} }
-
-func (h *Handler) GetMessages(c *gin.Context) {
-	peerID := c.Param("peer_id")
-	userIDVal, ok := c.Get("userID")
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
-		return
-	}
-	msgs, err := h.uc.GetMessages(c.Request.Context(), userIDVal.(uint), peerID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"messages": msgs})
-}
-
-func (h *Handler) SendMessage(c *gin.Context) {
-	var msg domain.Message
-	if err := c.BindJSON(&msg); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-	if _, err := strconv.Atoi(msg.SenderID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "sender_id must be numeric"})
-		return
-	}
-	if _, err := strconv.Atoi(msg.ReceiverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "receiver_id must be numeric"})
-		return
-	}
-	if err := h.uc.SendMessage(c.Request.Context(), &msg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message", "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusCreated, gin.H{"message": msg})
-}
-END_FILE:internal/adapters/http/messages/handler.go
 # path: internal/domain/search/entity.go | lang: go | tokens: 354 | size: 1416
 BEGIN_FILE:internal/domain/search/entity.go
 package search
@@ -12472,66 +12936,6 @@ type SearchFilters struct {
 	Offset int
 }
 END_FILE:internal/domain/search/entity.go
-# path: internal/usecase/messages/usecase.go | lang: go | tokens: 347 | size: 1390
-# functions: NewService, roomID
-BEGIN_FILE:internal/usecase/messages/usecase.go
-package messages
-
-import (
-	"context"
-	"errors"
-	chatDomain "server/internal/domain/chats"
-	domain "server/internal/domain/messages"
-	"sort"
-	"strconv"
-	"time"
-)
-
-var ErrInvalidUserID = errors.New("invalid user id")
-
-type service struct {
-	repo     domain.Repository
-	chatRepo chatDomain.Repository
-}
-
-func NewService(repo domain.Repository, chatRepo chatDomain.Repository) domain.UseCase {
-	return &service{repo: repo, chatRepo: chatRepo}
-}
-
-func roomID(a, b string) string {
-	ids := []string{a, b}
-	sort.Strings(ids)
-	return ids[0] + "-" + ids[1]
-}
-
-func (s *service) GetMessages(ctx context.Context, me uint, peerID string) ([]domain.Message, error) {
-	mine := strconv.FormatUint(uint64(me), 10)
-	r := roomID(peerID, mine)
-	_ = s.repo.MarkSeen(ctx, r, mine)
-	return s.repo.ListByRoom(ctx, r)
-}
-
-func (s *service) SendMessage(ctx context.Context, msg *domain.Message) error {
-	receiver, err := strconv.ParseUint(msg.ReceiverID, 10, 64)
-	if err != nil {
-		return ErrInvalidUserID
-	}
-
-	msg.RoomID = roomID(msg.ReceiverID, msg.SenderID)
-	if msg.TimeStamp.IsZero() {
-		msg.TimeStamp = time.Now().UTC()
-	}
-
-	if err := s.chatRepo.IncrementMessageCount(ctx, uint(receiver)); err != nil {
-		return err
-	}
-	ts := msg.TimeStamp.UTC().Format(time.RFC3339)
-	if err := s.chatRepo.UpdateLastMessage(ctx, uint(receiver), msg.Message, &ts); err != nil {
-		return err
-	}
-	return s.repo.Create(ctx, msg)
-}
-END_FILE:internal/usecase/messages/usecase.go
 # path: internal/usecase/attendance/usecase.go | lang: go | tokens: 347 | size: 1388
 # functions: NewService
 BEGIN_FILE:internal/usecase/attendance/usecase.go
@@ -12631,6 +13035,131 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/research/routes.go
+# path: internal/platform/websocket/manager.go | lang: go | tokens: 342 | size: 1368
+# functions: NewManager
+BEGIN_FILE:internal/platform/websocket/manager.go
+package websocket
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// Envelope is the standard JSON structure for all WebSocket messages
+type Envelope struct {
+	Type    string      `json:"type"`
+	Payload interface{} `json:"payload"`
+}
+
+// Manager handles application-level WebSocket operations using the Hub
+type Manager struct {
+	Hub *Hub
+}
+
+// NewManager creates a new WebSocketManager
+func NewManager(hub *Hub) *Manager {
+	return &Manager{Hub: hub}
+}
+
+// SendToUser marshals the payload into an envelope and sends it to the specific user via the Hub
+func (m *Manager) SendToUser(userID string, eventType string, payload interface{}) error {
+	envelope := Envelope{
+		Type:    eventType,
+		Payload: payload,
+	}
+
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("failed to marshal websocket envelope: %w", err)
+	}
+
+	m.Hub.Broadcast <- &HubMessage{
+		TargetUserID: userID,
+		Payload:      data,
+	}
+
+	return nil
+}
+
+// IsOnline checks if a specific user is currently connected to the WebSocket
+func (m *Manager) IsOnline(userID string) bool {
+	return m.Hub.IsOnline(userID)
+}
+
+// GetOnlineUsers filters a list of user IDs to return only those currently online
+func (m *Manager) GetOnlineUsers(userIDs []string) []string {
+	online := make([]string, 0)
+	for _, id := range userIDs {
+		if m.IsOnline(id) {
+			online = append(online, id)
+		}
+	}
+	return online
+}
+END_FILE:internal/platform/websocket/manager.go
+# path: internal/adapters/http/notifications/ws_handler.go | lang: go | tokens: 341 | size: 1364
+BEGIN_FILE:internal/adapters/http/notifications/ws_handler.go
+package notifications
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"server/internal/platform/miscallenous"
+	"server/internal/platform/websocket"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+func (h *Handler) Upgrade(c *gin.Context) {
+	// Extract the token from the "token" query parameter
+	tokenString := c.Query("token")
+	if tokenString == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing token"})
+		return
+	}
+
+	// Decode and validate the token
+	decodedToken, err := miscallenous.DecodeJWTToken(tokenString)
+	if err != nil || !decodedToken.Valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var userID uint
+	if claims, ok := decodedToken.Claims.(jwt.MapClaims); ok {
+		if sub, ok := claims["sub"].(float64); ok {
+			userID = uint(sub)
+		}
+	}
+
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID in token"})
+		return
+	}
+
+	// Upgrade the connection to WebSocket
+	conn, err := websocket.Upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade connection: %v", err)
+		return
+	}
+
+	client := &websocket.Client{
+		Hub:    h.hub,
+		Conn:   conn,
+		Send:   make(chan []byte, 256),
+		UserID: fmt.Sprintf("%d", userID),
+	}
+
+	client.Hub.Register <- client
+
+	// Start read/write pumps in goroutines
+	go client.WritePump()
+	go client.ReadPump()
+}
+END_FILE:internal/adapters/http/notifications/ws_handler.go
 # path: internal/domain/tasks/entity.go | lang: go | tokens: 335 | size: 1340
 BEGIN_FILE:internal/domain/tasks/entity.go
 package tasks
@@ -12921,50 +13450,6 @@ func (h *Handler) UpdateOnboardingProgress(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "onboarding progress updated"})
 }
 END_FILE:internal/adapters/http/onboarding/handler.go
-# path: internal/adapters/http/chats/handler.go | lang: go | tokens: 276 | size: 1105
-# functions: NewHandler
-BEGIN_FILE:internal/adapters/http/chats/handler.go
-package chats
-
-import (
-	"net/http"
-	domain "server/internal/domain/chats"
-	"strconv"
-
-	"github.com/gin-gonic/gin"
-)
-
-type Handler struct{ uc domain.UseCase }
-
-func NewHandler(uc domain.UseCase) *Handler { return &Handler{uc: uc} }
-
-func (h *Handler) Create(c *gin.Context) {
-	var chat domain.Chat
-	if err := c.BindJSON(&chat); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-	if err := h.uc.CreateChat(c.Request.Context(), &chat); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create chat", "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusCreated, gin.H{"chat": chat})
-}
-
-func (h *Handler) List(c *gin.Context) {
-	orgID, err := strconv.Atoi(c.Query("organisation_id"))
-	if err != nil || orgID <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "organisation_id is required"})
-		return
-	}
-	chats, err := h.uc.GetChats(c.Request.Context(), uint(orgID))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chats"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"chats": chats})
-}
-END_FILE:internal/adapters/http/chats/handler.go
 # path: internal/adapters/http/resources/routes.go | lang: go | tokens: 274 | size: 1099
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/resources/routes.go
@@ -12999,6 +13484,38 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/resources/routes.go
+# path: internal/domain/chats/entity.go | lang: go | tokens: 273 | size: 1093
+# imports: time
+BEGIN_FILE:internal/domain/chats/entity.go
+package chats
+
+import "time"
+
+type Chat struct {
+	ID             uint              `json:"id"`
+	OrganisationID uint              `json:"organisation_id"`
+	Name           string            `json:"name"`
+	IsGroup        bool              `json:"is_group"`
+	CreatedBy      uint              `json:"created_by"`
+	LastMessage    string            `json:"last_message"`
+	LastMessageAt  *time.Time        `json:"last_message_at"`
+	MessageCount   int               `json:"message_count"`
+	Participants   []ChatParticipant `json:"participants,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+type ChatParticipant struct {
+	ChatID            uint       `json:"chat_id"`
+	UserID            uint       `json:"user_id"`
+	FirstName         string     `json:"first_name"`
+	LastName          string     `json:"last_name"`
+	AvatarURL         string     `json:"avatar_url"`
+	UnreadCount       int        `json:"unread_count"`
+	LastReadMessageID *uint      `json:"last_read_message_id"`
+	JoinedAt          time.Time  `json:"joined_at"`
+}
+END_FILE:internal/domain/chats/entity.go
 # path: internal/platform/database/models/attendance_model.go | lang: go | tokens: 270 | size: 1082
 BEGIN_FILE:internal/platform/database/models/attendance_model.go
 package models
@@ -13097,6 +13614,34 @@ BEGIN_FILE:public/index.html
 </body>
 </html>
 END_FILE:public/index.html
+# path: internal/domain/messages/repository.go | lang: go | tokens: 256 | size: 1026
+# imports: context
+BEGIN_FILE:internal/domain/messages/repository.go
+package messages
+
+import "context"
+
+type Repository interface {
+	// Create inserts a new message and returns it with server-assigned ID and timestamp
+	Create(ctx context.Context, msg *Message) (*Message, error)
+
+	// ListByRoomCursor returns messages for a room using cursor-based pagination.
+	// cursor is empty for the first page. Subsequent pages pass NextCursor.
+	ListByRoomCursor(ctx context.Context, roomID string, cursor string, limit int) (*CursorPage, error)
+
+	// MarkSeen marks all messages in roomID as seen where receiver_id = receiverID
+	MarkSeen(ctx context.Context, roomID string, receiverID string) error
+
+	// MarkSeenUpTo marks messages as seen up to and including a specific message ID
+	MarkSeenUpTo(ctx context.Context, roomID string, receiverID string, upToMessageID uint) error
+
+	// DeleteMessage soft-deletes a message
+	DeleteMessage(ctx context.Context, messageID uint, requestingUserID string) error
+
+	// GetByID fetches a single message by ID
+	GetByID(ctx context.Context, id uint) (*Message, error)
+}
+END_FILE:internal/domain/messages/repository.go
 # path: internal/adapters/http/projects/routes.go | lang: go | tokens: 249 | size: 996
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/projects/routes.go
@@ -13215,6 +13760,38 @@ func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.File, er
 	}, nil
 }
 END_FILE:internal/adapters/repository/files/gorm_repository.go
+# path: internal/domain/messages/entity.go | lang: go | tokens: 240 | size: 963
+# imports: time
+BEGIN_FILE:internal/domain/messages/entity.go
+package messages
+
+import "time"
+
+type Message struct {
+	ID             uint       `json:"id"`
+	RoomID         string     `json:"room_id"`
+	SenderID       string     `json:"sender_id"`
+	ReceiverID     string     `json:"receiver_id"`
+	OrganisationID uint       `json:"organisation_id"`
+	Message        string     `json:"message"`
+	MessageType    string     `json:"message_type"`
+	FileURL        *string    `json:"file_url"`
+	FileName       *string    `json:"file_name"`
+	FileSize       *int64     `json:"file_size"`
+	IsSeen         bool       `json:"is_seen"`
+	IsDeleted      bool       `json:"is_deleted"`
+	ReplyToID      *uint      `json:"reply_to_id"`
+	ReplyToMessage *Message   `json:"reply_to_message,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+type CursorPage struct {
+	Messages   []Message `json:"messages"`
+	NextCursor string    `json:"next_cursor"`
+	HasMore    bool      `json:"has_more"`
+}
+END_FILE:internal/domain/messages/entity.go
 # path: internal/usecase/organisation/usecase.go | lang: go | tokens: 233 | size: 934
 # functions: NewService
 BEGIN_FILE:internal/usecase/organisation/usecase.go
@@ -13287,6 +13864,40 @@ type Project struct {
 	Milestones       []Milestone  `gorm:"foreignKey:ProjectID" json:"milestones"`
 }
 END_FILE:internal/platform/database/models/project_model.go
+# path: internal/usecase/chats/usecase.go | lang: go | tokens: 231 | size: 925
+# functions: NewService
+BEGIN_FILE:internal/usecase/chats/usecase.go
+package chats
+
+import (
+	"context"
+	domain "server/internal/domain/chats"
+)
+
+type service struct{ repo domain.Repository }
+
+func NewService(repo domain.Repository) domain.UseCase { return &service{repo: repo} }
+
+func (s *service) CreateChat(ctx context.Context, chat *domain.Chat) error {
+	return s.repo.Create(ctx, chat)
+}
+
+func (s *service) GetChats(ctx context.Context, organisationID uint) ([]domain.Chat, error) {
+	return s.repo.ListByOrganisation(ctx, organisationID)
+}
+
+func (s *service) GetUserChats(ctx context.Context, userID uint, orgID uint) ([]domain.Chat, error) {
+	return s.repo.ListByUser(ctx, userID, orgID)
+}
+
+func (s *service) GetOrCreateDM(ctx context.Context, userA uint, userB uint, orgID uint) (*domain.Chat, error) {
+	return s.repo.GetOrCreateDM(ctx, userA, userB, orgID)
+}
+
+func (s *service) GetChatByID(ctx context.Context, chatID uint) (*domain.Chat, error) {
+	return s.repo.GetByID(ctx, chatID)
+}
+END_FILE:internal/usecase/chats/usecase.go
 # path: internal/usecase/calendar/usecase.go | lang: go | tokens: 231 | size: 924
 # functions: NewService
 BEGIN_FILE:internal/usecase/calendar/usecase.go
@@ -13380,6 +13991,27 @@ type ResearchFolder struct {
 	Files      []ResearchFile     `gorm:"foreignKey:FolderID" json:"files,omitempty"`
 }
 END_FILE:internal/platform/database/models/research_folder_model.go
+# path: internal/domain/chats/repository.go | lang: go | tokens: 212 | size: 850
+# imports: context
+BEGIN_FILE:internal/domain/chats/repository.go
+package chats
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, chat *Chat) error
+	ListByOrganisation(ctx context.Context, organisationID uint) ([]Chat, error)
+	ListByUser(ctx context.Context, userID uint, orgID uint) ([]Chat, error)
+	GetByID(ctx context.Context, chatID uint) (*Chat, error)
+	UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error
+	IncrementMessageCount(ctx context.Context, id uint) error
+	GetOrCreateDM(ctx context.Context, userA uint, userB uint, orgID uint) (*Chat, error)
+	AddParticipant(ctx context.Context, chatID uint, userID uint) error
+	UpdateUnreadCount(ctx context.Context, chatID uint, userID uint, delta int) error
+	ResetUnreadCount(ctx context.Context, chatID uint, userID uint) error
+	GetParticipants(ctx context.Context, chatID uint) ([]ChatParticipant, error)
+}
+END_FILE:internal/domain/chats/repository.go
 # path: internal/adapters/http/employees/routes.go | lang: go | tokens: 211 | size: 846
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/employees/routes.go
@@ -13524,6 +14156,27 @@ func (s *service) CreateOffer(ctx context.Context, id uint, callingID, firstName
 }
 func (s *service) EndCall(ctx context.Context, id uint) error { return s.repo.EndCall(ctx, id) }
 END_FILE:internal/usecase/callstate/usecase.go
+# path: internal/domain/projects/repository.go | lang: go | tokens: 182 | size: 730
+# imports: context
+BEGIN_FILE:internal/domain/projects/repository.go
+package projects
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, project *Project) error
+	GetByID(ctx context.Context, id uint) (*Project, error)
+	Update(ctx context.Context, project *Project) error
+	Delete(ctx context.Context, id uint) error
+	GetByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
+	GetByTeam(ctx context.Context, teamID uint) ([]Project, error)
+	GetWithLessData(ctx context.Context, orgID uint) ([]Project, error)
+	CreateMilestone(ctx context.Context, milestone *Milestone) error
+	UpdateMilestone(ctx context.Context, milestone *Milestone) error
+	DeleteMilestone(ctx context.Context, id uint) error
+	GetMilestoneByID(ctx context.Context, id uint) (*Milestone, error)
+}
+END_FILE:internal/domain/projects/repository.go
 # path: internal/domain/employees/repository.go | lang: go | tokens: 182 | size: 731
 # imports: context
 BEGIN_FILE:internal/domain/employees/repository.go
@@ -13547,27 +14200,6 @@ type Repository interface {
 	GetBossByUserID(ctx context.Context, userID uint) (*Boss, error)
 }
 END_FILE:internal/domain/employees/repository.go
-# path: internal/domain/projects/repository.go | lang: go | tokens: 182 | size: 730
-# imports: context
-BEGIN_FILE:internal/domain/projects/repository.go
-package projects
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, project *Project) error
-	GetByID(ctx context.Context, id uint) (*Project, error)
-	Update(ctx context.Context, project *Project) error
-	Delete(ctx context.Context, id uint) error
-	GetByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
-	GetByTeam(ctx context.Context, teamID uint) ([]Project, error)
-	GetWithLessData(ctx context.Context, orgID uint) ([]Project, error)
-	CreateMilestone(ctx context.Context, milestone *Milestone) error
-	UpdateMilestone(ctx context.Context, milestone *Milestone) error
-	DeleteMilestone(ctx context.Context, id uint) error
-	GetMilestoneByID(ctx context.Context, id uint) (*Milestone, error)
-}
-END_FILE:internal/domain/projects/repository.go
 # path: docker-compose.yml | lang: yaml | tokens: 181 | size: 727
 BEGIN_FILE:docker-compose.yml
 services:
@@ -13606,25 +14238,6 @@ services:
 volumes:
   pgdata:
 END_FILE:docker-compose.yml
-# path: internal/domain/leave/usecase.go | lang: go | tokens: 178 | size: 714
-BEGIN_FILE:internal/domain/leave/usecase.go
-package leave
-
-import (
-	"context"
-	"time"
-)
-
-type UseCase interface {
-	RequestLeave(ctx context.Context, employeeID uint, orgID uint, leaveType string, startDate time.Time, endDate time.Time, reason string) (*Leave, error)
-	GetLeave(ctx context.Context, id uint) (*Leave, error)
-	GetMyLeaves(ctx context.Context, employeeID uint, offset int) ([]Leave, error)
-	GetOrganisationLeaves(ctx context.Context, orgID uint, status string, offset int) ([]Leave, error)
-	ApproveLeave(ctx context.Context, leaveID uint, managerID uint, managerNote string) error
-	RejectLeave(ctx context.Context, leaveID uint, managerID uint, managerNote string) error
-	CancelLeave(ctx context.Context, leaveID uint, employeeID uint) error
-}
-END_FILE:internal/domain/leave/usecase.go
 # path: internal/usecase/search/usecase.go | lang: go | tokens: 178 | size: 715
 # functions: NewService
 BEGIN_FILE:internal/usecase/search/usecase.go
@@ -13665,6 +14278,25 @@ func (s *service) Search(ctx context.Context, filters *domain.SearchFilters) (*d
 	return s.repo.Search(ctx, filters)
 }
 END_FILE:internal/usecase/search/usecase.go
+# path: internal/domain/leave/usecase.go | lang: go | tokens: 178 | size: 714
+BEGIN_FILE:internal/domain/leave/usecase.go
+package leave
+
+import (
+	"context"
+	"time"
+)
+
+type UseCase interface {
+	RequestLeave(ctx context.Context, employeeID uint, orgID uint, leaveType string, startDate time.Time, endDate time.Time, reason string) (*Leave, error)
+	GetLeave(ctx context.Context, id uint) (*Leave, error)
+	GetMyLeaves(ctx context.Context, employeeID uint, offset int) ([]Leave, error)
+	GetOrganisationLeaves(ctx context.Context, orgID uint, status string, offset int) ([]Leave, error)
+	ApproveLeave(ctx context.Context, leaveID uint, managerID uint, managerNote string) error
+	RejectLeave(ctx context.Context, leaveID uint, managerID uint, managerNote string) error
+	CancelLeave(ctx context.Context, leaveID uint, employeeID uint) error
+}
+END_FILE:internal/domain/leave/usecase.go
 # path: internal/domain/employees/usecase.go | lang: go | tokens: 173 | size: 692
 # imports: context
 BEGIN_FILE:internal/domain/employees/usecase.go
@@ -13758,6 +14390,42 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/tasks/routes.go
+# path: internal/platform/websocket/notification_broadcaster.go | lang: go | tokens: 160 | size: 643
+# functions: NewBroadcaster
+BEGIN_FILE:internal/platform/websocket/notification_broadcaster.go
+package websocket
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"server/internal/domain/notifications"
+)
+
+type Broadcaster struct {
+	hub *Hub
+}
+
+func NewBroadcaster(hub *Hub) notifications.Broadcaster {
+	return &Broadcaster{hub: hub}
+}
+
+func (b *Broadcaster) BroadcastNotification(ctx context.Context, n *notifications.Notification) error {
+	message, err := json.Marshal(n)
+	if err != nil {
+		log.Printf("Error marshaling notification: %v", err)
+		return err
+	}
+
+	// Send to the specific user's websocket connections
+	b.hub.Broadcast <- &HubMessage{
+		TargetUserID: fmt.Sprintf("%d", n.UserID),
+		Payload:      message,
+	}
+	return nil
+}
+END_FILE:internal/platform/websocket/notification_broadcaster.go
 # path: internal/domain/tasks/repository.go | lang: go | tokens: 160 | size: 641
 # imports: context
 BEGIN_FILE:internal/domain/tasks/repository.go
@@ -13922,38 +14590,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/leave/routes.go
-# path: internal/platform/websocket/notification_broadcaster.go | lang: go | tokens: 143 | size: 572
-# functions: NewBroadcaster
-BEGIN_FILE:internal/platform/websocket/notification_broadcaster.go
-package websocket
-
-import (
-	"context"
-	"encoding/json"
-	"log"
-	"server/internal/domain/notifications"
-)
-
-type Broadcaster struct {
-	hub *Hub
-}
-
-func NewBroadcaster(hub *Hub) notifications.Broadcaster {
-	return &Broadcaster{hub: hub}
-}
-
-func (b *Broadcaster) BroadcastNotification(ctx context.Context, n *notifications.Notification) error {
-	message, err := json.Marshal(n)
-	if err != nil {
-		log.Printf("Error marshaling notification: %v", err)
-		return err
-	}
-
-	// Send to the specific user's websocket connections
-	b.hub.BroadcastToUser(n.UserID, message)
-	return nil
-}
-END_FILE:internal/platform/websocket/notification_broadcaster.go
 # path: internal/usecase/onboarding/usecase.go | lang: go | tokens: 135 | size: 541
 # functions: NewService
 BEGIN_FILE:internal/usecase/onboarding/usecase.go
@@ -14119,24 +14755,25 @@ type Repository interface {
 	GetByID(ctx context.Context, attachmentID uint) (*TaskAttachment, error)
 }
 END_FILE:internal/domain/task_attachments/repository.go
-# path: internal/domain/chats/entity.go | lang: go | tokens: 121 | size: 487
+# path: internal/domain/notifications/entity.go | lang: go | tokens: 120 | size: 483
 # imports: time
-BEGIN_FILE:internal/domain/chats/entity.go
-package chats
+BEGIN_FILE:internal/domain/notifications/entity.go
+package notifications
 
 import "time"
 
-type Chat struct {
-	ID                   uint       `json:"id"`
-	FirstName            string     `json:"first_name"`
-	LastName             string     `json:"last_name"`
-	Email                string     `json:"email"`
-	OrganisationID       uint       `json:"organisation_id"`
-	LastMessage          string     `json:"last_message"`
-	LastMessageTimestamp *time.Time `json:"last_message_timestamp"`
-	NumberOfMessage      int        `json:"number_of_message"`
+type Notification struct {
+	ID               uint      `json:"id"`
+	UserID           uint      `json:"user_id"`
+	OrganisationID   uint      `json:"organisation_id"`
+	Title            string    `json:"title"`
+	Message          string    `json:"message"`
+	IsRead           bool      `json:"is_read"`
+	NotificationType string    `json:"notification_type"`
+	Link             string    `json:"link"`
+	CreatedAt        time.Time `json:"created_at"`
 }
-END_FILE:internal/domain/chats/entity.go
+END_FILE:internal/domain/notifications/entity.go
 # path: internal/platform/database/models/invite_model.go | lang: go | tokens: 120 | size: 481
 BEGIN_FILE:internal/platform/database/models/invite_model.go
 package models
@@ -14157,46 +14794,6 @@ type Invite struct {
 	Status         string    `gorm:"size:50;not null;default:'pending'"` // e.g. pending, accepted, expired
 }
 END_FILE:internal/platform/database/models/invite_model.go
-# path: internal/domain/notifications/entity.go | lang: go | tokens: 120 | size: 483
-# imports: time
-BEGIN_FILE:internal/domain/notifications/entity.go
-package notifications
-
-import "time"
-
-type Notification struct {
-	ID               uint      `json:"id"`
-	UserID           uint      `json:"user_id"`
-	OrganisationID   uint      `json:"organisation_id"`
-	Title            string    `json:"title"`
-	Message          string    `json:"message"`
-	IsRead           bool      `json:"is_read"`
-	NotificationType string    `json:"notification_type"`
-	Link             string    `json:"link"`
-	CreatedAt        time.Time `json:"created_at"`
-}
-END_FILE:internal/domain/notifications/entity.go
-# path: internal/usecase/chats/usecase.go | lang: go | tokens: 118 | size: 475
-# functions: NewService
-BEGIN_FILE:internal/usecase/chats/usecase.go
-package chats
-
-import (
-	"context"
-	domain "server/internal/domain/chats"
-)
-
-type service struct{ repo domain.Repository }
-
-func NewService(repo domain.Repository) domain.UseCase { return &service{repo: repo} }
-
-func (s *service) CreateChat(ctx context.Context, chat *domain.Chat) error {
-	return s.repo.Create(ctx, chat)
-}
-func (s *service) GetChats(ctx context.Context, organisationID uint) ([]domain.Chat, error) {
-	return s.repo.ListByOrganisation(ctx, organisationID)
-}
-END_FILE:internal/usecase/chats/usecase.go
 # path: internal/domain/task_attachments/entity.go | lang: go | tokens: 118 | size: 473
 # imports: time
 BEGIN_FILE:internal/domain/task_attachments/entity.go
@@ -14272,21 +14869,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/teams/routes.go
-# path: internal/domain/notifications/usecase.go | lang: go | tokens: 111 | size: 446
-BEGIN_FILE:internal/domain/notifications/usecase.go
-package notifications
-
-import (
-	"context"
-)
-
-type UseCase interface {
-	CreateNotification(ctx context.Context, userID uint, organisationID uint, title string, message string, notificationType string, link string) error
-	GetNotifications(ctx context.Context, userID uint, offset int) ([]Notification, error)
-	MarkNotificationRead(ctx context.Context, notificationID uint) error
-	MarkAllNotificationsRead(ctx context.Context, userID uint) error
-}
-END_FILE:internal/domain/notifications/usecase.go
 # path: internal/domain/attendance/entity.go | lang: go | tokens: 111 | size: 447
 BEGIN_FILE:internal/domain/attendance/entity.go
 package attendance
@@ -14306,6 +14888,21 @@ type Attendance struct {
 	CheckOutPhoto  int        `json:"check_out_photo"`
 }
 END_FILE:internal/domain/attendance/entity.go
+# path: internal/domain/notifications/usecase.go | lang: go | tokens: 111 | size: 446
+BEGIN_FILE:internal/domain/notifications/usecase.go
+package notifications
+
+import (
+	"context"
+)
+
+type UseCase interface {
+	CreateNotification(ctx context.Context, userID uint, organisationID uint, title string, message string, notificationType string, link string) error
+	GetNotifications(ctx context.Context, userID uint, offset int) ([]Notification, error)
+	MarkNotificationRead(ctx context.Context, notificationID uint) error
+	MarkAllNotificationsRead(ctx context.Context, userID uint) error
+}
+END_FILE:internal/domain/notifications/usecase.go
 # path: internal/domain/leave/repository.go | lang: go | tokens: 110 | size: 443
 BEGIN_FILE:internal/domain/leave/repository.go
 package leave
@@ -14470,6 +15067,21 @@ type UseCase interface {
 	GetTeams(ctx context.Context) ([]Team, error)
 }
 END_FILE:internal/domain/teams/usecase.go
+# path: internal/domain/chats/usecase.go | lang: go | tokens: 101 | size: 404
+# imports: context
+BEGIN_FILE:internal/domain/chats/usecase.go
+package chats
+
+import "context"
+
+type UseCase interface {
+	CreateChat(ctx context.Context, chat *Chat) error
+	GetChats(ctx context.Context, organisationID uint) ([]Chat, error)
+	GetUserChats(ctx context.Context, userID uint, orgID uint) ([]Chat, error)
+	GetOrCreateDM(ctx context.Context, userA uint, userB uint, orgID uint) (*Chat, error)
+	GetChatByID(ctx context.Context, chatID uint) (*Chat, error)
+}
+END_FILE:internal/domain/chats/usecase.go
 # path: internal/adapters/http/auth/routes.go | lang: go | tokens: 101 | size: 407
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/auth/routes.go
@@ -14544,6 +15156,20 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/task_attachments/routes.go
+# path: internal/domain/messages/usecase.go | lang: go | tokens: 94 | size: 379
+# imports: context
+BEGIN_FILE:internal/domain/messages/usecase.go
+package messages
+
+import "context"
+
+type UseCase interface {
+	GetMessages(ctx context.Context, roomID string, cursor string, limit int) (*CursorPage, error)
+	SendMessage(ctx context.Context, msg *Message) (*Message, error)
+	MarkSeen(ctx context.Context, roomID string, receiverID string) error
+	DeleteMessage(ctx context.Context, messageID uint, requestingUserID string) error
+}
+END_FILE:internal/domain/messages/usecase.go
 # path: internal/domain/task_comments/entity.go | lang: go | tokens: 93 | size: 373
 # imports: time
 BEGIN_FILE:internal/domain/task_comments/entity.go
@@ -14561,20 +15187,6 @@ type TaskComment struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 END_FILE:internal/domain/task_comments/entity.go
-# path: internal/domain/task_attachments/usecase.go | lang: go | tokens: 89 | size: 357
-BEGIN_FILE:internal/domain/task_attachments/usecase.go
-package task_attachments
-
-import (
-	"context"
-)
-
-type UseCase interface {
-	AttachFile(ctx context.Context, taskID uint, fileID uint, uploadedBy uint, fileName string) (*TaskAttachment, error)
-	GetAttachments(ctx context.Context, taskID uint) ([]TaskAttachment, error)
-	RemoveAttachment(ctx context.Context, attachmentID uint, requestingUserID uint) error
-}
-END_FILE:internal/domain/task_attachments/usecase.go
 # path: internal/adapters/http/task_comments/routes.go | lang: go | tokens: 89 | size: 357
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/task_comments/routes.go
@@ -14594,23 +15206,59 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/task_comments/routes.go
-# path: internal/domain/messages/entity.go | lang: go | tokens: 83 | size: 334
-# imports: time
-BEGIN_FILE:internal/domain/messages/entity.go
+# path: internal/domain/task_attachments/usecase.go | lang: go | tokens: 89 | size: 357
+BEGIN_FILE:internal/domain/task_attachments/usecase.go
+package task_attachments
+
+import (
+	"context"
+)
+
+type UseCase interface {
+	AttachFile(ctx context.Context, taskID uint, fileID uint, uploadedBy uint, fileName string) (*TaskAttachment, error)
+	GetAttachments(ctx context.Context, taskID uint) ([]TaskAttachment, error)
+	RemoveAttachment(ctx context.Context, attachmentID uint, requestingUserID uint) error
+}
+END_FILE:internal/domain/task_attachments/usecase.go
+# path: internal/adapters/http/callstate/routes.go | lang: go | tokens: 86 | size: 344
+# imports: github.com/gin-gonic/gin
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/callstate/routes.go
+package callstate
+
+import "github.com/gin-gonic/gin"
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	g := r.Group("/api/v1/calls")
+	g.Use(validateToken)
+	{
+		g.POST("/upsert", h.Upsert)
+		g.GET("/:id", h.Get)
+		g.PUT("/offer/:id", h.Offer)
+		g.PUT("/end/:id", h.End)
+		g.POST("/initiate", h.InitiateCall)
+	}
+}
+END_FILE:internal/adapters/http/callstate/routes.go
+# path: internal/adapters/http/messages/routes.go | lang: go | tokens: 85 | size: 340
+# imports: github.com/gin-gonic/gin
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/messages/routes.go
 package messages
 
-import "time"
+import "github.com/gin-gonic/gin"
 
-type Message struct {
-	ID         uint      `json:"id"`
-	RoomID     string    `json:"room_id"`
-	SenderID   string    `json:"sender_id"`
-	ReceiverID string    `json:"receiver_id"`
-	Message    string    `json:"message"`
-	IsSeen     bool      `json:"is_seen"`
-	TimeStamp  time.Time `json:"time_stamp"`
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	g := r.Group("/api/v1/messages")
+	g.Use(validateToken)
+	{
+		g.GET("/:room_id", h.GetMessages)
+		g.POST("/send", h.SendMessage)
+		g.PUT("/:room_id/seen", h.MarkSeen)
+		g.DELETE("/:id", h.DeleteMessage)
+	}
 }
-END_FILE:internal/domain/messages/entity.go
+END_FILE:internal/adapters/http/messages/routes.go
 # path: internal/domain/notifications/repository.go | lang: go | tokens: 82 | size: 331
 BEGIN_FILE:internal/domain/notifications/repository.go
 package notifications
@@ -14626,20 +15274,6 @@ type Repository interface {
 	MarkAllRead(ctx context.Context, userID uint) error
 }
 END_FILE:internal/domain/notifications/repository.go
-# path: internal/domain/chats/repository.go | lang: go | tokens: 82 | size: 330
-# imports: context
-BEGIN_FILE:internal/domain/chats/repository.go
-package chats
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, chat *Chat) error
-	ListByOrganisation(ctx context.Context, organisationID uint) ([]Chat, error)
-	UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error
-	IncrementMessageCount(ctx context.Context, id uint) error
-}
-END_FILE:internal/domain/chats/repository.go
 # path: internal/domain/organisation/usecase.go | lang: go | tokens: 82 | size: 329
 # imports: context
 BEGIN_FILE:internal/domain/organisation/usecase.go
@@ -14667,20 +15301,6 @@ type OnboardingProgress struct {
 	InviteSent       bool `json:"inviteSent"`
 }
 END_FILE:internal/domain/onboarding/entity.go
-# path: internal/domain/callstate/repository.go | lang: go | tokens: 79 | size: 319
-# imports: context
-BEGIN_FILE:internal/domain/callstate/repository.go
-package callstate
-
-import "context"
-
-type Repository interface {
-	CreateOrUpdate(ctx context.Context, state *State) error
-	GetByID(ctx context.Context, id uint) (*State, error)
-	UpdateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
-	EndCall(ctx context.Context, id uint) error
-}
-END_FILE:internal/domain/callstate/repository.go
 # path: internal/platform/database/models/work_schedule_model.go | lang: go | tokens: 79 | size: 319
 BEGIN_FILE:internal/platform/database/models/work_schedule_model.go
 package models
@@ -14714,6 +15334,34 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/onboarding/routes.go
+# path: internal/domain/callstate/repository.go | lang: go | tokens: 79 | size: 319
+# imports: context
+BEGIN_FILE:internal/domain/callstate/repository.go
+package callstate
+
+import "context"
+
+type Repository interface {
+	CreateOrUpdate(ctx context.Context, state *State) error
+	GetByID(ctx context.Context, id uint) (*State, error)
+	UpdateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
+	EndCall(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/callstate/repository.go
+# path: internal/domain/callstate/usecase.go | lang: go | tokens: 78 | size: 312
+# imports: context
+BEGIN_FILE:internal/domain/callstate/usecase.go
+package callstate
+
+import "context"
+
+type UseCase interface {
+	CreateOrUpdate(ctx context.Context, state *State) error
+	Get(ctx context.Context, id uint) (*State, error)
+	CreateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
+	EndCall(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/callstate/usecase.go
 # path: internal/platform/database/models/role_permissions_model.go | lang: go | tokens: 78 | size: 312
 BEGIN_FILE:internal/platform/database/models/role_permissions_model.go
 package models
@@ -14746,50 +15394,6 @@ type TaskComment struct {
 	User      UserModel `gorm:"foreignKey:UserID"`
 }
 END_FILE:internal/platform/database/models/task_comment_model.go
-# path: internal/domain/callstate/usecase.go | lang: go | tokens: 78 | size: 312
-# imports: context
-BEGIN_FILE:internal/domain/callstate/usecase.go
-package callstate
-
-import "context"
-
-type UseCase interface {
-	CreateOrUpdate(ctx context.Context, state *State) error
-	Get(ctx context.Context, id uint) (*State, error)
-	CreateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
-	EndCall(ctx context.Context, id uint) error
-}
-END_FILE:internal/domain/callstate/usecase.go
-# path: internal/platform/database/models/attendance_policy_model.go | lang: go | tokens: 77 | size: 310
-BEGIN_FILE:internal/platform/database/models/attendance_policy_model.go
-package models
-
-import (
-	"gorm.io/gorm"
-)
-
-type AttendancePolicy struct {
-	gorm.Model
-	OrganisationID uint   `gorm:"index;not null"`
-	CheckInTime    string `gorm:"size:10;not null"` // e.g., "09:00"
-	CheckOutTime   string `gorm:"size:10;not null"` // e.g., "18:00"
-	GracePeriodMins int   `gorm:"default:15"`
-}
-END_FILE:internal/platform/database/models/attendance_policy_model.go
-# path: internal/domain/task_comments/usecase.go | lang: go | tokens: 77 | size: 311
-BEGIN_FILE:internal/domain/task_comments/usecase.go
-package task_comments
-
-import (
-	"context"
-)
-
-type UseCase interface {
-	AddComment(ctx context.Context, taskID uint, userID uint, content string) (*TaskComment, error)
-	GetComments(ctx context.Context, taskID uint) ([]TaskComment, error)
-	DeleteComment(ctx context.Context, commentID uint, userID uint) error
-}
-END_FILE:internal/domain/task_comments/usecase.go
 # path: internal/platform/database/models/task_activity_model.go | lang: go | tokens: 77 | size: 309
 BEGIN_FILE:internal/platform/database/models/task_activity_model.go
 package models
@@ -14806,25 +15410,36 @@ type TaskActivity struct {
 	Description  string `gorm:"type:text"`
 }
 END_FILE:internal/platform/database/models/task_activity_model.go
-# path: internal/adapters/http/callstate/routes.go | lang: go | tokens: 76 | size: 306
-# imports: github.com/gin-gonic/gin
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/callstate/routes.go
-package callstate
+# path: internal/domain/task_comments/usecase.go | lang: go | tokens: 77 | size: 311
+BEGIN_FILE:internal/domain/task_comments/usecase.go
+package task_comments
 
-import "github.com/gin-gonic/gin"
+import (
+	"context"
+)
 
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	g := r.Group("/api/v1/calls")
-	g.Use(validateToken)
-	{
-		g.POST("/upsert", h.Upsert)
-		g.GET("/:id", h.Get)
-		g.PUT("/offer/:id", h.Offer)
-		g.PUT("/end/:id", h.End)
-	}
+type UseCase interface {
+	AddComment(ctx context.Context, taskID uint, userID uint, content string) (*TaskComment, error)
+	GetComments(ctx context.Context, taskID uint) ([]TaskComment, error)
+	DeleteComment(ctx context.Context, commentID uint, userID uint) error
 }
-END_FILE:internal/adapters/http/callstate/routes.go
+END_FILE:internal/domain/task_comments/usecase.go
+# path: internal/platform/database/models/attendance_policy_model.go | lang: go | tokens: 77 | size: 310
+BEGIN_FILE:internal/platform/database/models/attendance_policy_model.go
+package models
+
+import (
+	"gorm.io/gorm"
+)
+
+type AttendancePolicy struct {
+	gorm.Model
+	OrganisationID uint   `gorm:"index;not null"`
+	CheckInTime    string `gorm:"size:10;not null"` // e.g., "09:00"
+	CheckOutTime   string `gorm:"size:10;not null"` // e.g., "18:00"
+	GracePeriodMins int   `gorm:"default:15"`
+}
+END_FILE:internal/platform/database/models/attendance_policy_model.go
 # path: internal/platform/database/models/file_model.go | lang: go | tokens: 74 | size: 297
 # imports: gorm.io/gorm
 BEGIN_FILE:internal/platform/database/models/file_model.go
@@ -14840,23 +15455,24 @@ type File struct {
 	FileSize int64  `gorm:"not null" json:"file_size"`
 }
 END_FILE:internal/platform/database/models/file_model.go
-# path: internal/adapters/http/messages/routes.go | lang: go | tokens: 66 | size: 266
+# path: internal/adapters/http/chats/routes.go | lang: go | tokens: 70 | size: 282
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/messages/routes.go
-package messages
+BEGIN_FILE:internal/adapters/http/chats/routes.go
+package chats
 
 import "github.com/gin-gonic/gin"
 
 func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	g := r.Group("/api/v1/messages")
+	g := r.Group("/api/v1/chats")
 	g.Use(validateToken)
 	{
-		g.GET("/:peer_id", h.GetMessages)
-		g.POST("/send", h.SendMessage)
+		g.POST("/create", h.Create)
+		g.GET("", h.List)
+		g.GET("/dm/:peer_id", h.GetOrCreateDM)
 	}
 }
-END_FILE:internal/adapters/http/messages/routes.go
+END_FILE:internal/adapters/http/chats/routes.go
 # path: internal/domain/calendar/usecase.go | lang: go | tokens: 66 | size: 264
 BEGIN_FILE:internal/domain/calendar/usecase.go
 package calendar
@@ -14893,19 +15509,6 @@ type LeavePolicy struct {
 	Description    string `gorm:"type:text"`
 }
 END_FILE:internal/platform/database/models/leave_policy_model.go
-# path: internal/domain/messages/repository.go | lang: go | tokens: 63 | size: 253
-# imports: context
-BEGIN_FILE:internal/domain/messages/repository.go
-package messages
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, msg *Message) error
-	ListByRoom(ctx context.Context, roomID string) ([]Message, error)
-	MarkSeen(ctx context.Context, roomID string, receiverID string) error
-}
-END_FILE:internal/domain/messages/repository.go
 # path: internal/adapters/http/search/routes.go | lang: go | tokens: 61 | size: 247
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
@@ -14936,23 +15539,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/calendar/routes.go
-# path: internal/adapters/http/chats/routes.go | lang: go | tokens: 60 | size: 241
-# imports: github.com/gin-gonic/gin
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/chats/routes.go
-package chats
-
-import "github.com/gin-gonic/gin"
-
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	g := r.Group("/api/v1/chats")
-	g.Use(validateToken)
-	{
-		g.POST("/create", h.Create)
-		g.GET("", h.List)
-	}
-}
-END_FILE:internal/adapters/http/chats/routes.go
 # path: internal/domain/onboarding/usecase.go | lang: go | tokens: 59 | size: 239
 BEGIN_FILE:internal/domain/onboarding/usecase.go
 package onboarding
@@ -15070,30 +15656,30 @@ type Repository interface {
 	Search(ctx context.Context, filters *SearchFilters) (*SearchResults, error)
 }
 END_FILE:internal/domain/search/repository.go
-# path: internal/domain/messages/usecase.go | lang: go | tokens: 48 | size: 194
+# path: internal/domain/files/repository.go | lang: go | tokens: 41 | size: 164
 # imports: context
-BEGIN_FILE:internal/domain/messages/usecase.go
-package messages
+BEGIN_FILE:internal/domain/files/repository.go
+package files
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, file *File) error
+	GetByID(ctx context.Context, id uint) (*File, error)
+}
+END_FILE:internal/domain/files/repository.go
+# path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
+# imports: context
+BEGIN_FILE:internal/domain/files/usecase.go
+package files
 
 import "context"
 
 type UseCase interface {
-	GetMessages(ctx context.Context, me uint, peerID string) ([]Message, error)
-	SendMessage(ctx context.Context, msg *Message) error
+	UploadFile(ctx context.Context, file *File) error
+	GetFile(ctx context.Context, id uint) (*File, error)
 }
-END_FILE:internal/domain/messages/usecase.go
-# path: internal/domain/chats/usecase.go | lang: go | tokens: 44 | size: 179
-# imports: context
-BEGIN_FILE:internal/domain/chats/usecase.go
-package chats
-
-import "context"
-
-type UseCase interface {
-	CreateChat(ctx context.Context, chat *Chat) error
-	GetChats(ctx context.Context, organisationID uint) ([]Chat, error)
-}
-END_FILE:internal/domain/chats/usecase.go
+END_FILE:internal/domain/files/usecase.go
 # path: internal/domain/calls/usecase.go | lang: go | tokens: 41 | size: 165
 BEGIN_FILE:internal/domain/calls/usecase.go
 package calls
@@ -15107,30 +15693,6 @@ type UseCase interface {
 	HandleRoom(ctx context.Context, roomID string, ws *websocket.Conn)
 }
 END_FILE:internal/domain/calls/usecase.go
-# path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
-# imports: context
-BEGIN_FILE:internal/domain/files/usecase.go
-package files
-
-import "context"
-
-type UseCase interface {
-	UploadFile(ctx context.Context, file *File) error
-	GetFile(ctx context.Context, id uint) (*File, error)
-}
-END_FILE:internal/domain/files/usecase.go
-# path: internal/domain/files/repository.go | lang: go | tokens: 41 | size: 164
-# imports: context
-BEGIN_FILE:internal/domain/files/repository.go
-package files
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, file *File) error
-	GetByID(ctx context.Context, id uint) (*File, error)
-}
-END_FILE:internal/domain/files/repository.go
 # path: internal/adapters/http/calls/routes.go | lang: go | tokens: 36 | size: 147
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/calls/routes.go
@@ -15162,90 +15724,90 @@ package websocket
 // PresenceTracker can be used for future extension of presence logic
 type PresenceTracker struct{}
 END_FILE:internal/platform/websocket/presence_tracker.go
-# path: internal/adapters/repository/settings/gorm_repository.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/adapters/repository/settings/gorm_repository.go
-package settings
-END_FILE:internal/adapters/repository/settings/gorm_repository.go
-# path: internal/adapters/http/settings/handler.go | lang: go | tokens: 4 | size: 17
-BEGIN_FILE:internal/adapters/http/settings/handler.go
-package settings
-END_FILE:internal/adapters/http/settings/handler.go
-# path: internal/usecase/settings/usecase.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/usecase/settings/usecase.go
-package settings
-END_FILE:internal/usecase/settings/usecase.go
-# path: internal/adapters/repository/milestones/gorm_repository.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
-package milestones
-END_FILE:internal/adapters/repository/milestones/gorm_repository.go
-# path: internal/usecase/analytics/usecase.go | lang: go | tokens: 4 | size: 17
-BEGIN_FILE:internal/usecase/analytics/usecase.go
-package analytics
-END_FILE:internal/usecase/analytics/usecase.go
-# path: internal/usecase/milestones/usecase.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/usecase/milestones/usecase.go
-package milestones
-END_FILE:internal/usecase/milestones/usecase.go
-# path: internal/domain/settings/usecase.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/domain/settings/usecase.go
-package settings
-END_FILE:internal/domain/settings/usecase.go
 # path: internal/domain/settings/repository.go | lang: go | tokens: 4 | size: 16
 BEGIN_FILE:internal/domain/settings/repository.go
 package settings
 END_FILE:internal/domain/settings/repository.go
-# path: internal/adapters/http/settings/routes.go | lang: go | tokens: 4 | size: 17
-BEGIN_FILE:internal/adapters/http/settings/routes.go
-package settings
-END_FILE:internal/adapters/http/settings/routes.go
+# path: internal/adapters/repository/milestones/gorm_repository.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
+package milestones
+END_FILE:internal/adapters/repository/milestones/gorm_repository.go
 # path: internal/adapters/repository/analytics/gorm_repository.go | lang: go | tokens: 4 | size: 17
 BEGIN_FILE:internal/adapters/repository/analytics/gorm_repository.go
 package analytics
 END_FILE:internal/adapters/repository/analytics/gorm_repository.go
+# path: internal/adapters/repository/settings/gorm_repository.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/adapters/repository/settings/gorm_repository.go
+package settings
+END_FILE:internal/adapters/repository/settings/gorm_repository.go
+# path: internal/usecase/analytics/usecase.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/usecase/analytics/usecase.go
+package analytics
+END_FILE:internal/usecase/analytics/usecase.go
 # path: internal/domain/settings/entity.go | lang: go | tokens: 4 | size: 16
 BEGIN_FILE:internal/domain/settings/entity.go
 package settings
 END_FILE:internal/domain/settings/entity.go
-# path: internal/domain/analytics/usecase.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/domain/analytics/usecase.go
-package analytics
-END_FILE:internal/domain/analytics/usecase.go
 # path: internal/domain/analytics/entity.go | lang: go | tokens: 4 | size: 17
 BEGIN_FILE:internal/domain/analytics/entity.go
 package analytics
 END_FILE:internal/domain/analytics/entity.go
-# path: internal/domain/analytics/repository.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/domain/analytics/repository.go
-package analytics
-END_FILE:internal/domain/analytics/repository.go
-# path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/http/milestones/handler.go
-package milestone
-END_FILE:internal/adapters/http/milestones/handler.go
+# path: internal/domain/settings/usecase.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/domain/settings/usecase.go
+package settings
+END_FILE:internal/domain/settings/usecase.go
 # path: internal/adapters/http/analytics/routes.go | lang: go | tokens: 4 | size: 17
 BEGIN_FILE:internal/adapters/http/analytics/routes.go
 package analytics
 END_FILE:internal/adapters/http/analytics/routes.go
+# path: internal/adapters/http/settings/routes.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/http/settings/routes.go
+package settings
+END_FILE:internal/adapters/http/settings/routes.go
+# path: internal/adapters/http/settings/handler.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/http/settings/handler.go
+package settings
+END_FILE:internal/adapters/http/settings/handler.go
+# path: internal/domain/analytics/repository.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/domain/analytics/repository.go
+package analytics
+END_FILE:internal/domain/analytics/repository.go
 # path: internal/adapters/http/analytics/handler.go | lang: go | tokens: 4 | size: 18
 BEGIN_FILE:internal/adapters/http/analytics/handler.go
 package analytics
 END_FILE:internal/adapters/http/analytics/handler.go
+# path: internal/domain/analytics/usecase.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/domain/analytics/usecase.go
+package analytics
+END_FILE:internal/domain/analytics/usecase.go
+# path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/milestones/handler.go
+package milestone
+END_FILE:internal/adapters/http/milestones/handler.go
+# path: internal/usecase/settings/usecase.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/usecase/settings/usecase.go
+package settings
+END_FILE:internal/usecase/settings/usecase.go
+# path: internal/usecase/milestones/usecase.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/usecase/milestones/usecase.go
+package milestones
+END_FILE:internal/usecase/milestones/usecase.go
 # path: internal/adapters/http/milestones/routes.go | lang: go | tokens: 4 | size: 18
 BEGIN_FILE:internal/adapters/http/milestones/routes.go
 package milestone
 END_FILE:internal/adapters/http/milestones/routes.go
-# path: internal/domain/milestones/usecase.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/usecase.go
-package entity
-END_FILE:internal/domain/milestones/usecase.go
+# path: internal/domain/invites/usecase.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/domain/invites/usecase.go
+package invites
+END_FILE:internal/domain/invites/usecase.go
 # path: internal/usecase/invites/usecase.go | lang: go | tokens: 3 | size: 15
 BEGIN_FILE:internal/usecase/invites/usecase.go
 package invites
 END_FILE:internal/usecase/invites/usecase.go
-# path: internal/domain/invites/entity.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/domain/invites/entity.go
-package invites
-END_FILE:internal/domain/invites/entity.go
+# path: internal/usecase/audit/usecase.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/usecase/audit/usecase.go
+package audit
+END_FILE:internal/usecase/audit/usecase.go
 # path: internal/adapters/http/invites/routes.go | lang: go | tokens: 3 | size: 15
 BEGIN_FILE:internal/adapters/http/invites/routes.go
 package invites
@@ -15254,22 +15816,6 @@ END_FILE:internal/adapters/http/invites/routes.go
 BEGIN_FILE:internal/adapters/http/invites/handler.go
 package invites
 END_FILE:internal/adapters/http/invites/handler.go
-# path: internal/domain/milestones/repository.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/repository.go
-package entity
-END_FILE:internal/domain/milestones/repository.go
-# path: internal/usecase/audit/usecase.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/usecase/audit/usecase.go
-package audit
-END_FILE:internal/usecase/audit/usecase.go
-# path: internal/domain/invites/repository.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/domain/invites/repository.go
-package invites
-END_FILE:internal/domain/invites/repository.go
-# path: internal/domain/milestones/entity.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/entity.go
-package entity
-END_FILE:internal/domain/milestones/entity.go
 # path: internal/adapters/repository/audit/gorm_repository.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/adapters/repository/audit/gorm_repository.go
 package audit
@@ -15278,10 +15824,26 @@ END_FILE:internal/adapters/repository/audit/gorm_repository.go
 BEGIN_FILE:internal/adapters/repository/invites/gorm_repository.go
 package invites
 END_FILE:internal/adapters/repository/invites/gorm_repository.go
-# path: internal/domain/invites/usecase.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/domain/invites/usecase.go
+# path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/entity.go
+package audit
+END_FILE:internal/domain/audit/entity.go
+# path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/repository.go
+package audit
+END_FILE:internal/domain/audit/repository.go
+# path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/audit/usecase.go
+package audit
+END_FILE:internal/domain/audit/usecase.go
+# path: internal/domain/invites/entity.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/domain/invites/entity.go
 package invites
-END_FILE:internal/domain/invites/usecase.go
+END_FILE:internal/domain/invites/entity.go
+# path: internal/domain/invites/repository.go | lang: go | tokens: 3 | size: 15
+BEGIN_FILE:internal/domain/invites/repository.go
+package invites
+END_FILE:internal/domain/invites/repository.go
 # path: internal/adapters/http/audit/routes.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/adapters/http/audit/routes.go
 package audit
@@ -15290,16 +15852,16 @@ END_FILE:internal/adapters/http/audit/routes.go
 BEGIN_FILE:internal/adapters/http/audit/handler.go
 package audit
 END_FILE:internal/adapters/http/audit/handler.go
-# path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/audit/usecase.go
-package audit
-END_FILE:internal/domain/audit/usecase.go
-# path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/domain/audit/repository.go
-package audit
-END_FILE:internal/domain/audit/repository.go
-# path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/domain/audit/entity.go
-package audit
-END_FILE:internal/domain/audit/entity.go
-# included: 234 / 234 | total tokens: 108424
+# path: internal/domain/milestones/entity.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/entity.go
+package entity
+END_FILE:internal/domain/milestones/entity.go
+# path: internal/domain/milestones/repository.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/repository.go
+package entity
+END_FILE:internal/domain/milestones/repository.go
+# path: internal/domain/milestones/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/usecase.go
+package entity
+END_FILE:internal/domain/milestones/usecase.go
+# included: 235 / 235 | total tokens: 112411

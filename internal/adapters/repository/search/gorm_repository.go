@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	domain "server/internal/domain/search"
@@ -148,25 +149,22 @@ func (r *gormRepository) Search(ctx context.Context, filters *domain.SearchFilte
 		}
 	}
 
-	// ── Chats (group chats only — Chat model stores DMs by user name) ────────
-	// NOTE: The Chat model in this codebase is a DM/sync table (not a group chat
-	// model with is_group). We skip the is_group filter and search by first_name
-	// or last_name within the chat table so managers can find colleagues quickly.
-	// If a true group-chat model is introduced later, add is_group = true here.
+	// ── Chats (Group chats) ────────
 	if wantType(filters, "chat") {
 		var chats []models.Chat
 		err := r.db.WithContext(ctx).
-			Select("id, first_name, last_name, organisation_id").
-			Where("organisation_id = ? AND (first_name ILIKE ? OR last_name ILIKE ?)", orgID, like, like).
+			Select("id, name, organisation_id").
+			Where("organisation_id = ? AND name ILIKE ?", orgID, like).
 			Find(&chats).Error
 		if err != nil {
+			log.Default().Println("search chats error", err)
 			return nil, fmt.Errorf("search chats: %w", err)
 		}
 		for _, c := range chats {
 			chatItems = append(chatItems, domain.SearchResultItem{
 				ID:             c.ID,
 				Type:           "chat",
-				Title:          strings.TrimSpace(c.FirstName + " " + c.LastName),
+				Title:          c.Name,
 				OrganisationID: c.OrganisationID,
 			})
 		}
@@ -215,7 +213,7 @@ func (r *gormRepository) Search(ctx context.Context, filters *domain.SearchFilte
 			})
 		}
 	}
-	
+
 	// ── Research ─────────────────────────────────────────────────────────────
 	var researchItems []domain.SearchResultItem
 	if wantType(filters, "research") {

@@ -15,6 +15,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 
 	// Register WebSocket upgrade endpoint without validateToken middleware
 	// as query parameter authentication is handled internally.
-	r.GET("/api/v1/notifications/ws", h.Upgrade)
+	r.GET("/api/v1/ws", h.Upgrade)
 }
 

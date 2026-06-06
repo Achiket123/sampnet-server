@@ -8,5 +8,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	{
 		g.POST("/create", h.Create)
 		g.GET("", h.List)
+		g.GET("/dm/:peer_id", h.GetOrCreateDM)
 	}
 }

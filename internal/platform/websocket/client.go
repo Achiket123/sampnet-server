@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -41,9 +42,7 @@ type Client struct {
 	Send chan []byte
 
 	// Client metadata.
-	UserID         uint
-	EmployeeID     uint
-	OrganisationID uint
+	UserID string
 }
 
 func (c *Client) ReadPump() {
@@ -58,12 +57,26 @@ func (c *Client) ReadPump() {
 		return nil
 	})
 	for {
-		_, _, err := c.Conn.ReadMessage()
+		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
 			break
+		}
+
+		// Try to parse basic envelope to handle internal commands like subscribe_room
+		var envelope struct {
+			Type   string `json:"type"`
+			RoomID string `json:"room_id"` // Payload structure depending on type
+		}
+		if err := json.Unmarshal(message, &envelope); err == nil {
+			if envelope.Type == "subscribe_room" && envelope.RoomID != "" {
+				c.Hub.Subscribe <- &RoomSubscription{
+					Client: c,
+					RoomID: envelope.RoomID,
+				}
+			}
 		}
 	}
 }
