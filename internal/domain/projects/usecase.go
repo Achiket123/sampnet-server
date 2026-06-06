@@ -10,4 +10,8 @@ type UseCase interface {
 	GetProjectsByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
 	GetProjectsByTeam(ctx context.Context, teamID uint) ([]Project, error)
 	GetProjectsWithLessData(ctx context.Context, orgID uint) ([]Project, error)
+	CreateMilestone(ctx context.Context, milestone *Milestone) error
+	UpdateMilestone(ctx context.Context, milestone *Milestone) error
+	DeleteMilestone(ctx context.Context, id uint) error
+	GetMilestoneByID(ctx context.Context, id uint) (*Milestone, error)
 }

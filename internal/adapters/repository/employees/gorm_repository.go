@@ -6,7 +6,6 @@ import (
 	domain "server/internal/domain/employees"
 	orgDomain "server/internal/domain/organisation"
 	"server/internal/platform/database/models"
-	"time"
 
 	"gorm.io/gorm"
 )
@@ -58,7 +57,7 @@ func (r *gormRepository) Update(ctx context.Context, emp *domain.Employee) error
 }
 
 func (r *gormRepository) Delete(ctx context.Context, id uint) error {
-	return r.db.WithContext(ctx).Model(&models.Employee{}).Where("user_id = ?", id).Update("deleted_at", time.Now()).Error
+	return r.db.WithContext(ctx).Where("user_id = ?", id).Delete(&models.Employee{}).Error
 }
 
 func (r *gormRepository) Search(ctx context.Context, query string) ([]domain.Employee, error) {
@@ -82,6 +81,7 @@ func (r *gormRepository) CreateManager(ctx context.Context, manager *domain.Mana
 		UserID:         manager.UserID,
 		OrganisationID: manager.OrganisationID,
 		Type:           manager.Type,
+		Email:          manager.Email,
 		Salary:         manager.Salary,
 		LastLoginAt:    manager.LastLoginAt,
 	}
@@ -107,6 +107,7 @@ func (r *gormRepository) GetManagerByUserID(ctx context.Context, userID uint) (*
 			ID:          model.Organisation.ID,
 			CompanyName: model.Organisation.CompanyName,
 		},
+		Email:       model.Email,
 		Type:        model.Type,
 		Salary:      model.Salary,
 		LastLoginAt: model.LastLoginAt,
@@ -118,6 +119,7 @@ func (r *gormRepository) CreateBoss(ctx context.Context, boss *domain.Boss) erro
 		UserID:         boss.UserID,
 		OrganisationID: boss.OrganisationID,
 		LastLoginAt:    boss.LastLoginAt,
+		Email:          boss.Email,
 	}
 	return r.db.WithContext(ctx).Create(model).Error
 }
@@ -136,6 +138,7 @@ func (r *gormRepository) GetBossByUserID(ctx context.Context, userID uint) (*dom
 			Email:       model.User.Email,
 			PhoneNumber: model.User.PhoneNumber,
 		},
+		Email:          model.Email,
 		OrganisationID: model.OrganisationID,
 		Organisation: orgDomain.Entity{
 			ID:          model.Organisation.ID,
@@ -150,6 +153,7 @@ func toModel(e *domain.Employee) *models.Employee {
 		UserID:         e.UserID,
 		EmploymentID:   e.EmploymentID,
 		OrganisationID: e.OrganisationID,
+		Email:          e.Email,
 		Type:           e.Type,
 		Salary:         e.Salary,
 		LastLoginAt:    e.LastLoginAt,
@@ -172,6 +176,7 @@ func toDomain(m *models.Employee) *domain.Employee {
 			ID:          m.Organisation.ID,
 			CompanyName: m.Organisation.CompanyName,
 		},
+		Email:       m.Email,
 		Type:        m.Type,
 		Salary:      m.Salary,
 		LastLoginAt: m.LastLoginAt,

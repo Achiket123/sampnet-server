@@ -21,4 +21,5 @@ type Project struct {
 	Priority         string       `gorm:"size:50" json:"priority"`
 	CompletionStatus string       `gorm:"size:50" json:"completion_status"`
 	Organisation     Organisation `gorm:"foreignKey:OrganisationID" json:"organisation"`
+	Milestones       []Milestone  `gorm:"foreignKey:ProjectID" json:"milestones"`
 }

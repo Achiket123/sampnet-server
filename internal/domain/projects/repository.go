@@ -10,4 +10,8 @@ type Repository interface {
 	GetByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
 	GetByTeam(ctx context.Context, teamID uint) ([]Project, error)
 	GetWithLessData(ctx context.Context, orgID uint) ([]Project, error)
+	CreateMilestone(ctx context.Context, milestone *Milestone) error
+	UpdateMilestone(ctx context.Context, milestone *Milestone) error
+	DeleteMilestone(ctx context.Context, id uint) error
+	GetMilestoneByID(ctx context.Context, id uint) (*Milestone, error)
 }

@@ -20,6 +20,79 @@ func (r *GormRepository) Create(ctx context.Context, chat *domain.Chat) error {
 }
 
 func (r *GormRepository) ListByOrganisation(ctx context.Context, organisationID uint) ([]domain.Chat, error) {
+	// Automatically synchronize/upsert missing employees/managers/boss of that organisation into the chats table.
+	var employees []models.Employee
+	_ = r.db.WithContext(ctx).Preload("User").Where("organisation_id = ?", organisationID).Find(&employees)
+
+	var managers []models.Manager
+	_ = r.db.WithContext(ctx).Preload("User").Where("organisation_id = ?", organisationID).Find(&managers)
+
+	var boss models.Boss
+	bossFound := false
+	if err := r.db.WithContext(ctx).Preload("User").Where("organisation_id = ?", organisationID).First(&boss).Error; err == nil {
+		bossFound = true
+	}
+
+	now := time.Now()
+
+	for _, emp := range employees {
+		if emp.User.ID > 0 {
+			var count int64
+			r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", emp.User.ID).Count(&count)
+			if count == 0 {
+				chat := models.Chat{
+					ID:                   emp.User.ID,
+					FirstName:            emp.User.FirstName,
+					LastName:             emp.User.LastName,
+					Email:                emp.User.Email,
+					OrganisationID:       organisationID,
+					LastMessage:          "",
+					LastMessageTimestamp: &now,
+					NumberOfMessage:      0,
+				}
+				r.db.WithContext(ctx).Create(&chat)
+			}
+		}
+	}
+
+	for _, mgr := range managers {
+		if mgr.User.ID > 0 {
+			var count int64
+			r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", mgr.User.ID).Count(&count)
+			if count == 0 {
+				chat := models.Chat{
+					ID:                   mgr.User.ID,
+					FirstName:            mgr.User.FirstName,
+					LastName:             mgr.User.LastName,
+					Email:                mgr.User.Email,
+					OrganisationID:       organisationID,
+					LastMessage:          "",
+					LastMessageTimestamp: &now,
+					NumberOfMessage:      0,
+				}
+				r.db.WithContext(ctx).Create(&chat)
+			}
+		}
+	}
+
+	if bossFound && boss.User.ID > 0 {
+		var count int64
+		r.db.WithContext(ctx).Model(&models.Chat{}).Where("id = ?", boss.User.ID).Count(&count)
+		if count == 0 {
+			chat := models.Chat{
+				ID:                   boss.User.ID,
+				FirstName:            boss.User.FirstName,
+				LastName:             boss.User.LastName,
+				Email:                boss.User.Email,
+				OrganisationID:       organisationID,
+				LastMessage:          "",
+				LastMessageTimestamp: &now,
+				NumberOfMessage:      0,
+			}
+			r.db.WithContext(ctx).Create(&chat)
+		}
+	}
+
 	var rows []models.Chat
 	if err := r.db.WithContext(ctx).Where("organisation_id = ?", organisationID).Order("last_message_timestamp desc nulls last").Find(&rows).Error; err != nil {
 		return nil, err

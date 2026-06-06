@@ -30,7 +30,7 @@ func (r *gormRepository) Create(ctx context.Context, project *domain.Project) er
 
 func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.Project, error) {
 	var model models.Project
-	if err := r.db.WithContext(ctx).Preload("Team").Preload("CreatedByUser").Preload("Organisation").First(&model, id).Error; err != nil {
+	if err := r.db.WithContext(ctx).Preload("Team").Preload("CreatedByUser").Preload("Organisation").Preload("Milestones").First(&model, id).Error; err != nil {
 		return nil, err
 	}
 	return toDomain(&model), nil
@@ -47,7 +47,7 @@ func (r *gormRepository) Delete(ctx context.Context, id uint) error {
 
 func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint) ([]domain.Project, error) {
 	var modelsList []models.Project
-	if err := r.db.WithContext(ctx).Preload("Team").Preload("CreatedByUser").Where("organisation_id = ?", orgID).Find(&modelsList).Error; err != nil {
+	if err := r.db.WithContext(ctx).Preload("Team").Preload("CreatedByUser").Preload("Milestones").Where("organisation_id = ?", orgID).Find(&modelsList).Error; err != nil {
 		return nil, err
 	}
 	return toDomainList(modelsList), nil
@@ -55,7 +55,7 @@ func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint) ([]d
 
 func (r *gormRepository) GetByTeam(ctx context.Context, teamID uint) ([]domain.Project, error) {
 	var modelsList []models.Project
-	if err := r.db.WithContext(ctx).Preload("Team").Preload("CreatedByUser").Where("team_id = ?", teamID).Find(&modelsList).Error; err != nil {
+	if err := r.db.WithContext(ctx).Preload("Team").Preload("CreatedByUser").Preload("Milestones").Where("team_id = ?", teamID).Find(&modelsList).Error; err != nil {
 		return nil, err
 	}
 	return toDomainList(modelsList), nil
@@ -75,6 +75,56 @@ func (r *gormRepository) GetWithLessData(ctx context.Context, orgID uint) ([]dom
 		}
 	}
 	return result, nil
+}
+
+func (r *gormRepository) CreateMilestone(ctx context.Context, milestone *domain.Milestone) error {
+	model := &models.Milestone{
+		ProjectID:      milestone.ProjectID,
+		Title:          milestone.Title,
+		Description:    milestone.Description,
+		DueDate:        milestone.DueDate,
+		Status:         milestone.Status,
+		OrganisationID: milestone.OrganisationID,
+	}
+	model.ID = milestone.ID
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	milestone.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) UpdateMilestone(ctx context.Context, milestone *domain.Milestone) error {
+	model := &models.Milestone{
+		ProjectID:      milestone.ProjectID,
+		Title:          milestone.Title,
+		Description:    milestone.Description,
+		DueDate:        milestone.DueDate,
+		Status:         milestone.Status,
+		OrganisationID: milestone.OrganisationID,
+	}
+	model.ID = milestone.ID
+	return r.db.WithContext(ctx).Save(model).Error
+}
+
+func (r *gormRepository) DeleteMilestone(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Delete(&models.Milestone{}, id).Error
+}
+
+func (r *gormRepository) GetMilestoneByID(ctx context.Context, id uint) (*domain.Milestone, error) {
+	var model models.Milestone
+	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return &domain.Milestone{
+		ID:             model.ID,
+		ProjectID:      model.ProjectID,
+		Title:          model.Title,
+		Description:    model.Description,
+		DueDate:        model.DueDate,
+		Status:         model.Status,
+		OrganisationID: model.OrganisationID,
+	}, nil
 }
 
 func toModel(p *domain.Project) *models.Project {
@@ -111,6 +161,21 @@ func toDomain(m *models.Project) *domain.Project {
 	p.Organisation = orgDomain.Entity{ID: m.Organisation.ID, CompanyName: m.Organisation.CompanyName}
 	p.Team = teamDomain.Team{ID: m.Team.ID, Name: m.Team.Name}
 	p.CreatedByUser = authDomain.User{ID: m.CreatedByUser.ID, FirstName: m.CreatedByUser.FirstName, LastName: m.CreatedByUser.LastName}
+	
+	if len(m.Milestones) > 0 {
+		p.Milestones = make([]domain.Milestone, len(m.Milestones))
+		for i, ms := range m.Milestones {
+			p.Milestones[i] = domain.Milestone{
+				ID:             ms.ID,
+				ProjectID:      ms.ProjectID,
+				Title:          ms.Title,
+				Description:    ms.Description,
+				DueDate:        ms.DueDate,
+				Status:         ms.Status,
+				OrganisationID: ms.OrganisationID,
+			}
+		}
+	}
 	return p
 }
 
@@ -121,3 +186,4 @@ func toDomainList(modelsList []models.Project) []domain.Project {
 	}
 	return result
 }
+

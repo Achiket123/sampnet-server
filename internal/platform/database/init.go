@@ -40,50 +40,61 @@ func initDB() *gorm.DB {
 }
 
 func PerformMigrations() error {
-	if err := DB.AutoMigrate(&models.Organisation{}); err != nil {
+	err := DB.AutoMigrate(
+		&models.Organisation{},
+		&models.UserModel{},
+		&models.Task{},
+		&models.File{},
+		&models.Employee{},
+		&models.Manager{},
+		&models.Boss{},
+		&models.Attendance{},
+		&models.Project{},
+		&models.Team{},
+		&models.TeamMember{},
+		&models.Notification{},
+		&models.Chat{},
+		&models.ChatMessage{},
+		&models.CallState{},
+		&models.TaskComment{},
+		&models.TaskAttachment{},
+		&models.OnboardingProgress{},
+		&models.Leave{},
+		&models.Milestone{},
+		&models.LeavePolicy{},
+		&models.AttendancePolicy{},
+		&models.RolePermissions{},
+		&models.TaskType{},
+		&models.TaskActivity{},
+		&models.WorkSchedule{},
+		&models.AuditLog{},
+		&models.Invite{},
+		&models.ResourceCollection{},
+		&models.ResourceRecord{},
+		&models.ResourceRecordHistory{},
+		&models.ResourceRecordAttachment{},
+		&models.ResearchEntry{},
+		&models.ResearchFolder{},
+		&models.ResearchDocument{},
+		&models.ResearchDocumentVersion{},
+		&models.ResearchFile{},
+		&models.ResearchReference{},
+		&models.ResearchCollaborator{},
+		&models.ResearchActivity{},
+		&models.PeopleContact{},
+		&models.PeopleInteraction{},
+		&models.PeoplePipelineStage{},
+		&models.PeopleList{},
+		&models.PeopleListContact{},
+	)
+	if err != nil {
 		return err
 	}
-	if err := DB.AutoMigrate(&models.UserModel{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.Task{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.File{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.Employee{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.Attendance{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.Project{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.Team{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.TeamMember{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.Notification{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.Chat{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.ChatMessage{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.CallState{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.TaskComment{}); err != nil {
-		return err
-	}
-	if err := DB.AutoMigrate(&models.TaskAttachment{}); err != nil {
-		return err
-	}
+
+	// Create GIN index and search helper indexes for Resource Collection and Records
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_data ON resource_records USING GIN (data)`)
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_collection_org ON resource_records (collection_id, organisation_id)`)
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_collections_org ON resource_collections (organisation_id)`)
+
 	return nil
 }

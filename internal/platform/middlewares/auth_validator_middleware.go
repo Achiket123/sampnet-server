@@ -1,8 +1,11 @@
 package middlewares
 
 import (
+	"log"
 	"net/http"
-	"server/internal/platform/miscallenous" 
+	"server/internal/platform/miscallenous"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -14,10 +17,13 @@ func ValidateToken() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Extract the token from the Authorization header
 		token := c.GetHeader("Authorization")
+		if strings.Contains(token, "Bearer ") {
+			token = strings.TrimPrefix(token, "Bearer ")
+		}
 
 		// Attempt to decode and validate the token
 		decodedToken, err := miscallenous.DecodeJWTToken(token)
-
+		log.Default().Println(err)
 		// If there's an error in decoding, respond with Unauthorized
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
@@ -30,6 +36,30 @@ func ValidateToken() gin.HandlerFunc {
 			if claims, ok := decodedToken.Claims.(jwt.MapClaims); ok {
 				if sub, ok := claims["sub"].(float64); ok {
 					c.Set("userID", uint(sub))
+				}
+				if emp, ok := claims["employee"].(map[string]interface{}); ok {
+					if orgID, ok := emp["organisation_id"].(float64); ok {
+						c.Set("organisationID", uint(orgID))
+					}
+					role := "employee"
+					if t, ok := emp["type"].(string); ok {
+						if t == "owner" || t == "boss" {
+							role = "boss"
+						} else if t == "manager" {
+							role = "manager"
+						}
+					}
+					c.Set("role", role)
+				} else if mgr, ok := claims["manager"].(map[string]interface{}); ok {
+					if orgID, ok := mgr["organisation_id"].(float64); ok {
+						c.Set("organisationID", uint(orgID))
+					}
+					c.Set("role", "manager")
+				} else if boss, ok := claims["boss"].(map[string]interface{}); ok {
+					if orgID, ok := boss["organisation_id"].(float64); ok {
+						c.Set("organisationID", uint(orgID))
+					}
+					c.Set("role", "boss")
 				}
 			}
 			c.Next()

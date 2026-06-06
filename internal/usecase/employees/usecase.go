@@ -2,11 +2,11 @@ package employees
 
 import (
 	"context"
-	domain "server/internal/domain/employees"
+	"errors"
 	authDomain "server/internal/domain/auth"
+	domain "server/internal/domain/employees"
 	orgDomain "server/internal/domain/organisation"
 	"server/internal/platform/miscallenous"
-	"errors"
 )
 
 type service struct {
@@ -27,12 +27,12 @@ func (s *service) AddEmployee(ctx context.Context, emp *domain.Employee) error {
 	// If UserID is 0, we might need to create the user first (based on original logic)
 	// But usually, we'd expect the user to exist or provide user details.
 	// Looking at AddEmployees, it takes user details.
-	
+
 	if emp.UserID == 0 {
 		user := &authDomain.User{
 			FirstName:   emp.User.FirstName,
 			LastName:    emp.User.LastName,
-			Email:       emp.User.Email,
+			Email:       emp.Email,
 			PhoneNumber: emp.User.PhoneNumber,
 		}
 		if err := s.userRepo.Create(ctx, user); err != nil {
@@ -53,6 +53,28 @@ func (s *service) GetEmployee(ctx context.Context, id uint) (*domain.Employee, e
 }
 
 func (s *service) UpdateEmployee(ctx context.Context, emp *domain.Employee) error {
+	existingUser, err := s.userRepo.GetByID(ctx, emp.UserID)
+	if err != nil {
+		return err
+	}
+	if emp.User.FirstName != "" {
+		existingUser.FirstName = emp.User.FirstName
+	}
+	if emp.User.LastName != "" {
+		existingUser.LastName = emp.User.LastName
+	}
+	if emp.User.Email != "" {
+		existingUser.Email = emp.User.Email
+	}
+	if emp.User.PhoneNumber != "" {
+		existingUser.PhoneNumber = emp.User.PhoneNumber
+	}
+	if emp.User.ProfilePic != "" {
+		existingUser.ProfilePic = emp.User.ProfilePic
+	}
+	if err := s.userRepo.Update(ctx, existingUser); err != nil {
+		return err
+	}
 	return s.repo.Update(ctx, emp)
 }
 
@@ -87,6 +109,12 @@ func (s *service) IsEmployeeOrManager(ctx context.Context, userID uint) (string,
 	if err == nil {
 		token, err := miscallenous.GenerateJWTToken(employee, "employee", employee.UserID)
 		return "Employee found", employee, token, err
+	}
+
+	boss, err := s.repo.GetBossByUserID(ctx, userID)
+	if err == nil {
+		token, err := miscallenous.GenerateJWTToken(boss, "boss", boss.UserID)
+		return "Boss found", boss, token, err
 	}
 
 	return "", nil, "", errors.New("user not found as employee or manager")
