@@ -19,8 +19,8 @@ const (
 	// Send pings to peer with this period. Must be less than pongWait.
 	pingPeriod = (pongWait * 9) / 10
 
-	// Maximum message size allowed from peer.
-	maxMessageSize = 512
+	// Maximum message size allowed from peer (increased for WebRTC SDP payloads).
+	maxMessageSize = 16384
 )
 
 var Upgrader = websocket.Upgrader{
@@ -66,15 +66,34 @@ func (c *Client) ReadPump() {
 		}
 
 		// Try to parse basic envelope to handle internal commands like subscribe_room
+		// and route WebRTC signaling messages directly
 		var envelope struct {
-			Type   string `json:"type"`
-			RoomID string `json:"room_id"` // Payload structure depending on type
+			Type          string   `json:"type"`
+			RoomID        string   `json:"room_id"` // Payload structure depending on type
+			TargetUserIDs []string `json:"target_user_ids"`
 		}
 		if err := json.Unmarshal(message, &envelope); err == nil {
 			if envelope.Type == "subscribe_room" && envelope.RoomID != "" {
 				c.Hub.Subscribe <- &RoomSubscription{
 					Client: c,
 					RoomID: envelope.RoomID,
+				}
+			} else if envelope.Type == "call_offer" || envelope.Type == "call_answer" || envelope.Type == "ice_candidate" || envelope.Type == "call_ended" || envelope.Type == "call_rejected" || envelope.Type == "call_accepted" {
+				// Broadcast to all specified target users
+				for _, targetID := range envelope.TargetUserIDs {
+					if targetID != "" {
+						c.Hub.Broadcast <- &HubMessage{
+							TargetUserID: targetID,
+							Payload:      message,
+						}
+					}
+				}
+				// Also broadcast to the room for users already subscribed
+				if envelope.RoomID != "" {
+					c.Hub.Broadcast <- &HubMessage{
+						TargetRoomID: envelope.RoomID,
+						Payload:      message,
+					}
 				}
 			}
 		}
