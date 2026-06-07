@@ -25,3 +25,16 @@ type Leave struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
+
+type LeaveSummary struct {
+	TotalLeavesTaken int            `json:"total_leaves_taken"`
+	ApprovedCount    int            `json:"approved_count"`
+	PendingCount     int            `json:"pending_count"`
+	RejectedCount    int            `json:"rejected_count"`
+	LeavesByType     map[string]int `json:"leaves_by_type"`
+}
+
+type LeaveHistory struct {
+	Records []Leave      `json:"records"`
+	Summary LeaveSummary `json:"summary"`
+}

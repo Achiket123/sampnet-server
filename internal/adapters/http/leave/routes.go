@@ -15,5 +15,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 		leaveRoutes.PUT("/:leave_id/approve", h.ApproveLeave)
 		leaveRoutes.PUT("/:leave_id/reject", h.RejectLeave)
 		leaveRoutes.PUT("/:leave_id/cancel", h.CancelLeave)
+		leaveRoutes.GET("/employee/:employeeId/history", h.GetEmployeeLeaveHistory)
 	}
 }

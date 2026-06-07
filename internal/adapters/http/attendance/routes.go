@@ -11,5 +11,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 		attendanceGroup.POST("/create", h.PostAttendance)
 		attendanceGroup.PUT("/:id", h.UpdateAttendance)
 		attendanceGroup.GET("/:id", h.GetAttendanceByDateAndUser)
+		attendanceGroup.GET("/employee/:userId/history", h.GetEmployeeAttendanceHistory)
 	}
 }

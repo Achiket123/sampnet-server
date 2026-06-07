@@ -71,3 +71,37 @@ func ValidateToken() gin.HandlerFunc {
 		c.Abort()
 	}
 }
+
+func RoleMiddleware(roles []string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userRoleStr, exists := c.Get("role")
+		if !exists {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: No role found"})
+			c.Abort()
+			return
+		}
+
+		userRole, ok := userRoleStr.(string)
+		if !ok {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Invalid role type"})
+			c.Abort()
+			return
+		}
+
+		allowed := false
+		for _, r := range roles {
+			if r == userRole {
+				allowed = true
+				break
+			}
+		}
+
+		if !allowed {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}

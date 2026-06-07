@@ -11,4 +11,5 @@ type UseCase interface {
 	GetAttendanceByUser(ctx context.Context, userID uint, offset int) ([]Attendance, error)
 	GetAttendanceByOrganisation(ctx context.Context, orgID uint, offset int) ([]Attendance, error)
 	GetAttendanceByDateAndUser(ctx context.Context, userID uint, date time.Time) (*Attendance, error)
+	GetEmployeeAttendanceHistory(ctx context.Context, userID uint, from *time.Time, to *time.Time, limit int, offset int) (*AttendanceHistory, error)
 }

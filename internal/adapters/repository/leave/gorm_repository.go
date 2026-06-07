@@ -4,6 +4,7 @@ import (
 	"context"
 	"server/internal/domain/leave"
 	"server/internal/platform/database/models"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -69,6 +70,39 @@ func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint, stat
 		Limit(20).
 		Offset(offset * 20).
 		Preload("Employee").
+		Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+
+	leaves := make([]leave.Leave, len(modelsList))
+	for i, m := range modelsList {
+		leaves[i] = *toDomain(&m)
+	}
+	return leaves, nil
+}
+
+func (r *gormRepository) GetHistoryByEmployee(ctx context.Context, employeeID uint, status string, from *time.Time, to *time.Time, limit int, offset int) ([]leave.Leave, error) {
+	query := r.db.WithContext(ctx).Where("employee_id = ?", employeeID)
+
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	if from != nil {
+		query = query.Where("start_date >= ?", *from)
+	}
+	if to != nil {
+		query = query.Where("end_date <= ?", *to)
+	}
+
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+
+	var modelsList []models.Leave
+	if err := query.
+		Order("created_at DESC").
+		Offset(offset).
 		Find(&modelsList).Error; err != nil {
 		return nil, err
 	}

@@ -173,3 +173,34 @@ func (s *service) CancelLeave(ctx context.Context, leaveID uint, employeeID uint
 	l.Status = "cancelled"
 	return s.repo.Update(ctx, l)
 }
+
+func (s *service) GetEmployeeLeaveHistory(ctx context.Context, employeeID uint, status string, from *time.Time, to *time.Time, limit int, offset int) (*leave.LeaveHistory, error) {
+	records, err := s.repo.GetHistoryByEmployee(ctx, employeeID, status, from, to, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	summary := leave.LeaveSummary{
+		LeavesByType: make(map[string]int),
+	}
+
+	for _, rec := range records {
+		summary.TotalLeavesTaken += rec.TotalDays
+		
+		switch rec.Status {
+		case "approved":
+			summary.ApprovedCount++
+		case "pending":
+			summary.PendingCount++
+		case "rejected":
+			summary.RejectedCount++
+		}
+		
+		summary.LeavesByType[rec.LeaveType]++
+	}
+
+	return &leave.LeaveHistory{
+		Records: records,
+		Summary: summary,
+	}, nil
+}

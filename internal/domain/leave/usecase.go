@@ -13,4 +13,5 @@ type UseCase interface {
 	ApproveLeave(ctx context.Context, leaveID uint, managerID uint, managerNote string) error
 	RejectLeave(ctx context.Context, leaveID uint, managerID uint, managerNote string) error
 	CancelLeave(ctx context.Context, leaveID uint, employeeID uint) error
+	GetEmployeeLeaveHistory(ctx context.Context, employeeID uint, status string, from *time.Time, to *time.Time, limit int, offset int) (*LeaveHistory, error)
 }

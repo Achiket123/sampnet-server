@@ -217,3 +217,56 @@ func (h *Handler) CancelLeave(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "leave cancelled"})
 }
+
+func (h *Handler) GetEmployeeLeaveHistory(c *gin.Context) {
+	employeeIDStr := c.Param("employeeId")
+	employeeID, err := strconv.ParseUint(employeeIDStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid employee ID"})
+		return
+	}
+
+	status := c.Query("status")
+	
+	limitStr := c.Query("limit")
+	limit := 10 // default limit
+	if limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	offsetStr := c.Query("offset")
+	offset := 0
+	if offsetStr != "" {
+		if parsed, err := strconv.Atoi(offsetStr); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	var fromTime *time.Time
+	if from := c.Query("from"); from != "" {
+		if parsed, err := time.Parse(time.RFC3339, from); err == nil {
+			fromTime = &parsed
+		} else if parsed, err := time.Parse("2006-01-02", from); err == nil {
+			fromTime = &parsed
+		}
+	}
+
+	var toTime *time.Time
+	if to := c.Query("to"); to != "" {
+		if parsed, err := time.Parse(time.RFC3339, to); err == nil {
+			toTime = &parsed
+		} else if parsed, err := time.Parse("2006-01-02", to); err == nil {
+			toTime = &parsed
+		}
+	}
+
+	history, err := h.uc.GetEmployeeLeaveHistory(c.Request.Context(), uint(employeeID), status, fromTime, toTime, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch leave history"})
+		return
+	}
+
+	c.JSON(http.StatusOK, history)
+}

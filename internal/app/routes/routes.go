@@ -1,6 +1,7 @@
 package routes
 
 import (
+	analyticsHTTP "server/internal/adapters/http/analytics"
 	attendanceHTTP "server/internal/adapters/http/attendance"
 	authHTTP "server/internal/adapters/http/auth"
 	callHTTP "server/internal/adapters/http/calls"
@@ -23,6 +24,7 @@ import (
 	calendarHTTP "server/internal/adapters/http/calendar"
 	researchHTTP "server/internal/adapters/http/research"
 	peopleHTTP "server/internal/adapters/http/people"
+	analyticsRepo "server/internal/adapters/repository/analytics"
 	attendanceRepo "server/internal/adapters/repository/attendance"
 	authRepo "server/internal/adapters/repository/auth"
 	callStateRepo "server/internal/adapters/repository/callstate"
@@ -47,6 +49,7 @@ import (
 	"server/internal/platform/database"
 	"server/internal/platform/middlewares"
 	"server/internal/platform/websocket"
+	analyticsService "server/internal/usecase/analytics"
 	attendanceService "server/internal/usecase/attendance"
 	authService "server/internal/usecase/auth"
 	callService "server/internal/usecase/calls"
@@ -190,4 +193,12 @@ func SetupRoutes(r *gin.Engine) {
 	peopleUseCase := peopleService.NewUseCase(peopleRepository)
 	peopleHandler := peopleHTTP.NewHandler(peopleUseCase)
 	peopleHTTP.RegisterRoutes(r, peopleHandler, validateToken)
+
+	analyticsRepository := analyticsRepo.NewGormRepository(database.DB)
+	analyticsUseCase := analyticsService.NewService(analyticsRepository)
+	analyticsHandler := analyticsHTTP.NewHandler(analyticsUseCase)
+	
+	// Ensure Boss or Manager role for analytics
+	roleMiddleware := middlewares.RoleMiddleware([]string{"boss", "manager"})
+	analyticsHTTP.RegisterRoutes(r, analyticsHandler, validateToken, roleMiddleware)
 }

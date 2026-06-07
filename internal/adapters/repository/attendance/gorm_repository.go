@@ -55,6 +55,27 @@ func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint, offs
 	return toDomainList(modelsList), nil
 }
 
+func (r *gormRepository) GetHistoryByUser(ctx context.Context, userID uint, from *time.Time, to *time.Time, limit int, offset int) ([]domain.Attendance, error) {
+	var modelsList []models.Attendance
+	query := r.db.WithContext(ctx).Where("user_id = ?", userID)
+	
+	if from != nil {
+		query = query.Where("date >= ?", from.Format("2006-01-02"))
+	}
+	if to != nil {
+		query = query.Where("date <= ?", to.Format("2006-01-02"))
+	}
+	
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	
+	if err := query.Offset(offset).Order("date desc").Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
 func toModel(a *domain.Attendance) *models.Attendance {
 	model := &models.Attendance{
 		UserID:         a.UserID,
@@ -70,7 +91,7 @@ func toModel(a *domain.Attendance) *models.Attendance {
 }
 
 func toDomain(m *models.Attendance) *domain.Attendance {
-	return &domain.Attendance{
+	att := &domain.Attendance{
 		ID:             m.ID,
 		UserID:         m.UserID,
 		Date:           m.Date,
@@ -80,6 +101,13 @@ func toDomain(m *models.Attendance) *domain.Attendance {
 		CheckInPhoto:   m.CheckInPhoto,
 		CheckOutPhoto:  m.CheckOutPhoto,
 	}
+	
+	if m.CheckInTime != nil && m.CheckOutTime != nil {
+		duration := int(m.CheckOutTime.Sub(*m.CheckInTime).Minutes())
+		att.DurationMinutes = &duration
+	}
+	
+	return att
 }
 
 func toDomainList(modelsList []models.Attendance) []domain.Attendance {
