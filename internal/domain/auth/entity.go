@@ -25,3 +25,12 @@ type RefreshToken struct {
 	ExpiresAt int64
 	Revoked   bool
 }
+
+type EmailVerification struct {
+	ID        uint       `json:"id"`
+	UserID    uint       `json:"user_id"`
+	Token     string     `json:"token"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	UsedAt    *time.Time `json:"used_at"`
+}
+

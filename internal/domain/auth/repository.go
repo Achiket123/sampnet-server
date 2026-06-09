@@ -14,4 +14,9 @@ type Repository interface {
 	GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error)
 	RevokeRefreshToken(ctx context.Context, tokenHash string) error
 	RevokeAllUserRefreshTokens(ctx context.Context, userID uint) error
+
+	CreateEmailVerification(ctx context.Context, ev *EmailVerification) error
+	GetEmailVerificationByToken(ctx context.Context, token string) (*EmailVerification, error)
+	GetActiveEmailVerificationByUserID(ctx context.Context, userID uint) (*EmailVerification, error)
+	UpdateEmailVerification(ctx context.Context, ev *EmailVerification) error
 }

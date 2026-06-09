@@ -1,8 +1,8 @@
 package main
 
 import (
-	"server/internal/platform/database"
 	"server/internal/app/routes"
+	"server/internal/platform/database"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -10,11 +10,12 @@ import (
 )
 
 func init() {
-	godotenv.Load()
+	godotenv.Load(".env")
 	database.Init()
+
 }
 
-func  main() {
+func main() {
 	// Perform database migrations
 	if err := database.PerformMigrations(); err != nil {
 		panic("Failed to perform database migrations: " + err.Error())
@@ -30,5 +31,6 @@ func  main() {
 		AllowCredentials: true,
 	}))
 	routes.SetupRoutes(r)
+
 	r.Run(":8000")
 }

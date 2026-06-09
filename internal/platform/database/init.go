@@ -70,6 +70,8 @@ func PerformMigrations() error {
 		&models.WorkSchedule{},
 		&models.AuditLog{},
 		&models.Invite{},
+		&models.EmployeeInvite{},
+		&models.EmailVerification{},
 		&models.ResourceCollection{},
 		&models.ResourceRecord{},
 		&models.ResourceRecordHistory{},
@@ -87,6 +89,7 @@ func PerformMigrations() error {
 		&models.PeoplePipelineStage{},
 		&models.PeopleList{},
 		&models.PeopleListContact{},
+		&models.RefreshToken{},
 	)
 	if err != nil {
 		return err

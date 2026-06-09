@@ -8,6 +8,7 @@ import (
 	callStateHTTP "server/internal/adapters/http/callstate"
 	chatHTTP "server/internal/adapters/http/chats"
 	employeeHTTP "server/internal/adapters/http/employees"
+	inviteHTTP "server/internal/adapters/http/invites"
 	fileHTTP "server/internal/adapters/http/files"
 	leaveHTTP "server/internal/adapters/http/leave"
 	messageHTTP "server/internal/adapters/http/messages"
@@ -30,6 +31,7 @@ import (
 	callStateRepo "server/internal/adapters/repository/callstate"
 	chatRepo "server/internal/adapters/repository/chats"
 	employeeRepo "server/internal/adapters/repository/employees"
+	inviteRepo "server/internal/adapters/repository/invites"
 	fileRepo "server/internal/adapters/repository/files"
 	leaveRepo "server/internal/adapters/repository/leave"
 	messageRepo "server/internal/adapters/repository/messages"
@@ -48,6 +50,7 @@ import (
 	peopleRepo "server/internal/adapters/repository/people"
 	"server/internal/platform/database"
 	"server/internal/platform/middlewares"
+	mailerPlatform "server/internal/platform/mailer"
 	"server/internal/platform/websocket"
 	analyticsService "server/internal/usecase/analytics"
 	attendanceService "server/internal/usecase/attendance"
@@ -56,6 +59,7 @@ import (
 	callStateService "server/internal/usecase/callstate"
 	chatService "server/internal/usecase/chats"
 	employeeService "server/internal/usecase/employees"
+	inviteService "server/internal/usecase/invites"
 	fileService "server/internal/usecase/files"
 	leaveService "server/internal/usecase/leave"
 	messageService "server/internal/usecase/messages"
@@ -105,15 +109,21 @@ func SetupRoutes(r *gin.Engine) {
 	organisationHandler := organisationHTTP.NewHandler(organisationService)
 	organisationHTTP.RegisterRoutes(r, organisationHandler, validateToken)
 
+	gmailMailer := mailerPlatform.NewGmailMailer()
 	authRepository := authRepo.NewGormRepository(database.DB)
 	empRepository := employeeRepo.NewGormRepository(database.DB)
-	authUseCase := authService.NewService(authRepository, empRepository)
+	authUseCase := authService.NewService(authRepository, empRepository, gmailMailer)
 	authHandler := authHTTP.NewHandler(authUseCase)
 	authHTTP.RegisterRoutes(r, authHandler, validateToken)
 
 	employeeUseCase := employeeService.NewService(empRepository, authRepository, organisationRepository)
 	employeeHandler := employeeHTTP.NewHandler(employeeUseCase)
 	employeeHTTP.RegisterRoutes(r, employeeHandler, validateToken)
+
+	inviteRepository := inviteRepo.NewGormRepository(database.DB)
+	inviteUseCase := inviteService.NewService(inviteRepository, authRepository, empRepository, gmailMailer)
+	inviteHandler := inviteHTTP.NewHandler(inviteUseCase)
+	inviteHTTP.RegisterRoutes(r, inviteHandler, validateToken)
 
 	taskRepository := taskRepo.NewGormRepository(database.DB)
 	taskUseCase := taskService.NewService(taskRepository, notificationUseCase)

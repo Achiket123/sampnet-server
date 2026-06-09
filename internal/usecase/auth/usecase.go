@@ -2,11 +2,16 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
+	"os"
 	domain "server/internal/domain/auth"
 	empDomain "server/internal/domain/employees"
 	"server/internal/platform/database/models"
+	mailerPlatform "server/internal/platform/mailer"
 	"server/internal/platform/miscallenous"
 	"time"
 
@@ -19,15 +24,17 @@ var (
 	ErrUserNotFound       = errors.New("user not found")
 	ErrNotAnEmployee      = errors.New("user is not an employee")
 	ErrInvalidToken       = errors.New("invalid or expired refresh token")
+	ErrInvitePending      = errors.New("please accept your invitation to set your password")
 )
 
 type service struct {
 	repo    domain.Repository
 	empRepo empDomain.Repository
+	mailer  mailerPlatform.Mailer
 }
 
-func NewService(repo domain.Repository, empRepo empDomain.Repository) domain.UseCase {
-	return &service{repo: repo, empRepo: empRepo}
+func NewService(repo domain.Repository, empRepo empDomain.Repository, mailer mailerPlatform.Mailer) domain.UseCase {
+	return &service{repo: repo, empRepo: empRepo, mailer: mailer}
 }
 
 func (s *service) SignUp(ctx context.Context, user *domain.User, password string) (domain.TokenPair, error) {
@@ -63,6 +70,10 @@ func (s *service) SignIn(ctx context.Context, email, password string) (domain.To
 	user, err := s.repo.GetByEmail(ctx, email)
 	if err != nil {
 		return domain.TokenPair{}, ErrInvalidCredentials
+	}
+
+	if user.HashedPassword == "" {
+		return domain.TokenPair{}, ErrInvitePending
 	}
 
 	if !miscallenous.VerifyPassword(user.HashedPassword, password) {
@@ -159,9 +170,10 @@ func (s *service) Logout(ctx context.Context, rawRefreshToken string) error {
 // issueTokenPair generates a new access + refresh token pair and persists the refresh token.
 func (s *service) issueTokenPair(ctx context.Context, user *domain.User) (domain.TokenPair, error) {
 	userModel := models.UserModel{
-		FirstName: user.FirstName,
-		LastName:  user.LastName,
-		Email:     user.Email,
+		FirstName:  user.FirstName,
+		LastName:   user.LastName,
+		Email:      user.Email,
+		IsVerified: user.IsVerified,
 	}
 	userModel.ID = user.ID
 
@@ -193,3 +205,98 @@ func (s *service) issueTokenPair(ctx context.Context, user *domain.User) (domain
 		RefreshToken: rawRefresh, // send raw; only hash is stored in DB
 	}, nil
 }
+
+func (s *service) SendVerificationEmail(ctx context.Context, userID uint) error {
+	user, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return ErrUserNotFound
+	}
+
+	if user.IsVerified {
+		return errors.New("user is already verified")
+	}
+
+	var token string
+	active, err := s.repo.GetActiveEmailVerificationByUserID(ctx, userID)
+	if err == nil && active != nil {
+		token = active.Token
+	} else {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		token = hex.EncodeToString(b)
+		ev := &domain.EmailVerification{
+			UserID:    userID,
+			Token:     token,
+			ExpiresAt: time.Now().Add(24 * time.Hour),
+		}
+		if err := s.repo.CreateEmailVerification(ctx, ev); err != nil {
+			return err
+		}
+	}
+
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "https://sampnet.achiket.site"
+	}
+	verificationURL := fmt.Sprintf("%s/verify-email-landing?token=%s", frontendURL, token)
+
+	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; margin: 0; padding: 20px;">
+  <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+    <h2 style="color: #2c3e50; border-bottom: 2px solid #e74c3c; padding-bottom: 10px; margin-top: 0;">Verify Your Email Address</h2>
+    <p>Hello %s,</p>
+    <p>Thank you for signing up! Please verify your email address by clicking the button below:</p>
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="%s" style="background-color: #e74c3c; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 4px; font-weight: bold; display: inline-block;">Verify Email</a>
+    </div>
+    <p style="font-size: 0.9em; color: #7f8c8d;">If the button doesn't work, copy and paste this link into your web browser:</p>
+    <p style="font-size: 0.9em; word-break: break-all; color: #e74c3c;"><a href="%s" style="color: #e74c3c;">%s</a></p>
+    <hr style="border: 0; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
+    <p style="font-size: 0.8em; color: #95a5a6; text-align: center;">This link will expire in <strong>24 hours</strong>.</p>
+  </div>
+</body>
+</html>`, user.FirstName, verificationURL, verificationURL, verificationURL)
+
+	return s.mailer.SendMail(user.Email, "Verify your email address", htmlBody)
+}
+
+func (s *service) VerifyEmail(ctx context.Context, token string) error {
+	ev, err := s.repo.GetEmailVerificationByToken(ctx, token)
+	if err != nil {
+		return errors.New("invalid or expired verification token")
+	}
+
+	if ev.UsedAt != nil {
+		return errors.New("this verification token has already been used")
+	}
+
+	if time.Now().After(ev.ExpiresAt) {
+		return errors.New("this verification token has expired")
+	}
+
+	user, err := s.repo.GetByID(ctx, ev.UserID)
+	if err != nil {
+		return ErrUserNotFound
+	}
+
+	user.IsVerified = true
+	if err := s.repo.Update(ctx, user); err != nil {
+		return err
+	}
+
+	now := time.Now()
+	ev.UsedAt = &now
+	return s.repo.UpdateEmailVerification(ctx, ev)
+}
+
+func (s *service) GetMe(ctx context.Context, userID uint) (domain.TokenPair, error) {
+	user, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return domain.TokenPair{}, ErrUserNotFound
+	}
+	return s.issueTokenPair(ctx, user)
+}
+

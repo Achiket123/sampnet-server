@@ -10,6 +10,9 @@ type UseCase interface {
 	ValidateEmployee(ctx context.Context, userID uint) (string, error)
 	RefreshToken(ctx context.Context, refreshToken string) (TokenPair, error)
 	Logout(ctx context.Context, refreshToken string) error
+	SendVerificationEmail(ctx context.Context, userID uint) error
+	VerifyEmail(ctx context.Context, token string) error
+	GetMe(ctx context.Context, userID uint) (TokenPair, error)
 }
 type TokenPair struct {
 	AccessToken  string `json:"access_token"`

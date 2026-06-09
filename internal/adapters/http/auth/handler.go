@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	domain "server/internal/domain/auth"
 	usecase "server/internal/usecase/auth"
@@ -18,18 +20,38 @@ func NewHandler(uc domain.UseCase) *Handler {
 }
 
 func (h *Handler) SignUp(c *gin.Context) {
+	/*
+			 "email": email,
+		      "password": hashedPassword,
+		      "first_name": firstName,
+		      "last_name": lastName,
+		      "phone_number": phoneNumber,
+		      "profile_pic": profilePic.toString(),
+		      "city": city,
+		      "country": country,
+		      "date_of_birth": dateOfBirth.toIso8601String(),
+	*/
 	var req struct {
-		FirstName   string `form:"first_name" binding:"required"`
-		LastName    string `form:"last_name" binding:"required"`
-		Email       string `form:"email" binding:"required,email"`
-		Password    string `form:"password" binding:"required"`
-		City        string `form:"city"`
-		Country     string `form:"country"`
-		PhoneNumber string `form:"phone_number" binding:"required"`
-		ProfilePic  string `form:"profile_pic"`
+		FirstName   string `json:"first_name" `
+		LastName    string `json:"last_name" `
+		Email       string `json:"email" `
+		Password    string `json:"password" `
+		City        string `json:"city"`
+		Country     string `json:"country"`
+		PhoneNumber string `json:"phone_number" `
+		ProfilePic  string `json:"profile_pic"`
 	}
 
-	if err := c.ShouldBind(&req); err != nil {
+	body := map[string]any{}
+	body_buf, err := json.MarshalIndent(body, "	", "		")
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Error"})
+		return
+	}
+
+	log.Default().Println(string(body_buf))
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Println(err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -59,21 +81,28 @@ func (h *Handler) SignUp(c *gin.Context) {
 }
 
 func (h *Handler) SignIn(c *gin.Context) {
-	email := c.Request.FormValue("email")
-	password := c.Request.FormValue("password")
-
-	if email == "" || password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Email and password are required"})
+	var req struct {
+		Email    string `form:"email" `
+		Password string `form:"password" `
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Println(err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
+	email := req.Email
+	password := req.Password
 	pair, err := h.uc.SignIn(c.Request.Context(), email, password)
 	if err != nil {
+		if errors.Is(err, usecase.ErrInvitePending) {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, usecase.ErrInvalidCredentials) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign in"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign in", "message": err.Error()})
 		return
 	}
 
@@ -184,4 +213,56 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
+}
+
+func (h *Handler) SendVerificationEmail(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	userID := userIDVal.(uint)
+
+	if err := h.uc.SendVerificationEmail(c.Request.Context(), userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Verification email sent successfully"})
+}
+
+func (h *Handler) VerifyEmail(c *gin.Context) {
+	token := c.Query("token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Verification token is required"})
+		return
+	}
+
+	if err := h.uc.VerifyEmail(c.Request.Context(), token); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Email verified successfully"})
+}
+
+func (h *Handler) GetMe(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	userID := userIDVal.(uint)
+
+	pair, err := h.uc.GetMe(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
 }

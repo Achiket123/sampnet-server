@@ -1,6 +1,7 @@
 package employees
 
 import (
+	"log"
 	"net/http"
 	authDomain "server/internal/domain/auth"
 	domain "server/internal/domain/employees"
@@ -21,6 +22,7 @@ func getUserAuthInfo(c *gin.Context) (uint, uint, string, bool) {
 	userIDVal, existsUser := c.Get("userID")
 	orgIDVal, existsOrg := c.Get("organisationID")
 	roleVal, existsRole := c.Get("role")
+	log.Default().Printf("UserID: %v, organisationID: %v, role: %v", userIDVal, orgIDVal, roleVal)
 	if !existsUser || !existsOrg || !existsRole {
 		return 0, 0, "", false
 	}
@@ -40,7 +42,7 @@ func (h *Handler) AddEmployee(c *gin.Context) {
 		return
 	}
 
-	if role != "boss" && role != "manager" {
+	if role != "boss" && role != "manager" && role != "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only owners (boss) or managers can add employees"})
 		return
 	}
@@ -85,7 +87,7 @@ func (h *Handler) MakeManager(c *gin.Context) {
 		return
 	}
 
-	if role != "boss" && role != "manager" {
+	if role != "boss" && role != "manager" && role != "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only owners (boss) or managers can make a manager"})
 		return
 	}
@@ -174,7 +176,7 @@ func (h *Handler) CreateEmployee(c *gin.Context) {
 		return
 	}
 
-	if role != "boss" && role != "manager" {
+	if role != "boss" && role != "manager" && role != "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only owners (boss) or managers can create employees"})
 		return
 	}
@@ -315,7 +317,7 @@ func (h *Handler) DeleteEmployee(c *gin.Context) {
 		return
 	}
 
-	if role != "boss" && role != "manager" {
+	if role != "boss" && role != "manager" && role != "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only owners (boss) or managers can delete employees"})
 		return
 	}

@@ -59,3 +59,28 @@ type Boss struct {
 	OnboardingCompleted bool      `gorm:"column:onboarding_completed;default:false" json:"onboarding_completed"`
 	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at"`
 }
+
+type EmployeeInvite struct {
+	gorm.Model
+	Token           string     `gorm:"column:token;uniqueIndex;not null" json:"token"`
+	Email           string     `gorm:"column:email;not null" json:"email"`
+	FirstName       string     `gorm:"column:first_name" json:"first_name"`
+	LastName        string     `gorm:"column:last_name" json:"last_name"`
+	PhoneNumber     string     `gorm:"column:phone_number" json:"phone_number"`
+	EmploymentID    int        `gorm:"column:employment_id" json:"employment_id"`
+	OrganisationID  uint       `gorm:"column:organisation_id;not null" json:"organisation_id"`
+	InvitedByUserID uint       `gorm:"column:invited_by_user_id;not null" json:"invited_by_user_id"`
+	Status          string     `gorm:"column:status;default:'pending'" json:"status"`
+	ExpiresAt       time.Time  `gorm:"column:expires_at" json:"expires_at"`
+	AcceptedAt      *time.Time `gorm:"column:accepted_at" json:"accepted_at"`
+}
+
+type EmailVerification struct {
+	gorm.Model
+	UserID    uint       `gorm:"column:user_id;uniqueIndex;not null" json:"user_id"`
+	Token     string     `gorm:"column:token;uniqueIndex;not null" json:"token"`
+	ExpiresAt time.Time  `gorm:"column:expires_at;not null" json:"expires_at"`
+	UsedAt    *time.Time `gorm:"column:used_at" json:"used_at"`
+}
+
+
