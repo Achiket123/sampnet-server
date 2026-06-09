@@ -2,6 +2,7 @@ package organisation
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	domain "server/internal/domain/organisation"
 	usecase "server/internal/usecase/organisation"
@@ -37,6 +38,7 @@ func (h *Handler) RegisterOrganisation(c *gin.Context) {
 
 	employee, err := h.uc.Register(c.Request.Context(), &org, ownerUserID)
 	if err != nil {
+		log.Default().Println("Failed to register organisation:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create organisation"})
 		return
 	}

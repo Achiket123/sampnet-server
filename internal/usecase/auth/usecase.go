@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"log"
 	domain "server/internal/domain/auth"
 	empDomain "server/internal/domain/employees"
 	"server/internal/platform/database/models"
@@ -58,6 +59,9 @@ func (s *service) SignUp(ctx context.Context, user *domain.User, password string
 			}
 		}
 	}
+	if err := s.repo.Create(ctx, user); err != nil {
+		return "", err
+	}
 	// Map domain user to model for JWT generation (as current JWT helper expects model)
 	// Ideally, the JWT helper should take a domain entity or a generic interface.
 	userModel := models.UserModel{
@@ -66,7 +70,7 @@ func (s *service) SignUp(ctx context.Context, user *domain.User, password string
 		Email:     user.Email,
 	}
 	userModel.ID = user.ID
-
+	log.Default().Println("Generating JWT token for user", user.ID)
 	token, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
 	if err != nil {
 		return "", err

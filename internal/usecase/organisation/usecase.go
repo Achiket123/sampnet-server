@@ -22,6 +22,7 @@ func (s *Service) Register(ctx context.Context, org *domain.Entity, ownerUserID 
 		return nil, ErrInvalidID
 	}
 	org.BossID = ownerUserID
+	
 	return s.repo.CreateWithOwner(ctx, org, ownerUserID)
 }
 

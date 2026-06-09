@@ -23,9 +23,9 @@ func ValidateToken() gin.HandlerFunc {
 
 		// Attempt to decode and validate the token
 		decodedToken, err := miscallenous.DecodeJWTToken(token)
-		log.Default().Println(err)
 		// If there's an error in decoding, respond with Unauthorized
 		if err != nil {
+			log.Default().Println(err)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			c.Abort()
 			return
@@ -33,6 +33,7 @@ func ValidateToken() gin.HandlerFunc {
 
 		// If the token is valid, allow the request to proceed
 		if decodedToken.Valid {
+			log.Default().Println("token is valid")
 			if claims, ok := decodedToken.Claims.(jwt.MapClaims); ok {
 				if sub, ok := claims["sub"].(float64); ok {
 					c.Set("userID", uint(sub))
@@ -43,9 +44,10 @@ func ValidateToken() gin.HandlerFunc {
 					}
 					role := "employee"
 					if t, ok := emp["type"].(string); ok {
-						if t == "owner" || t == "boss" {
+						switch t {
+						case "owner", "boss":
 							role = "boss"
-						} else if t == "manager" {
+						case "manager":
 							role = "manager"
 						}
 					}

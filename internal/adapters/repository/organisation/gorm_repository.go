@@ -54,6 +54,17 @@ func (r *GormRepository) CreateWithOwner(ctx context.Context, org *domain.Entity
 		}
 
 		org.BossID = ownerUserID
+		org.ID = model.ID
+		org.PlanID = model.PlanID
+		org.PlanStartDate = model.PlanStartDate
+		org.PlanEndDate = model.PlanEndDate
+		org.PlanStatus = model.PlanStatus
+		org.MaxEmployees = model.MaxEmployees
+		org.CompanyLogo = model.CompanyLogo
+		org.Industry = model.Industry
+		org.BillingAddress = model.BillingAddress
+		org.CompanySize = model.CompanySize
+
 		createdEmployee = domain.OwnerEmployeeRow{
 			UserID:         employee.UserID,
 			EmploymentID:   employee.EmploymentID,

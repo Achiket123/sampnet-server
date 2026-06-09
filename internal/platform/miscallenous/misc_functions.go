@@ -1,18 +1,23 @@
 package miscallenous
 
 import (
+	"errors"
 	"os"
 	"time"
+
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // generateJWTToken creates a new JWT token for the given user.
-func GenerateJWTToken(object any,tokenName string,ID uint) (string, error) {
+func GenerateJWTToken(object any, tokenName string, ID uint) (string, error) {
+	if ID == 0 {
+		return "", errors.New("ID must be greater than 0")
+	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		tokenName: object,
-			"sub": ID,
-		"exp":  time.Now().Add(time.Hour * 24 * 30).Unix(), // Expiration time (30 days from now)
+		"sub":     ID,
+		"exp":     time.Now().Add(time.Hour * 24 * 30).Unix(), // Expiration time (30 days from now)
 	}).SignedString([]byte(os.Getenv("SECRET")))
 }
 
@@ -35,7 +40,6 @@ func HashPassword(password string) (string, error) {
 	}
 	return string(hashedPassword), nil
 }
-
 
 func VerifyPassword(hashedPassword string, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)) == nil
