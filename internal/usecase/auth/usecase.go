@@ -40,23 +40,24 @@ func (s *service) SignUp(ctx context.Context, user *domain.User, password string
 	user.HashedPassword = hashedPassword
 	user.LastLoginAt = time.Now()
 	user_d, err := s.repo.GetByEmail(ctx, user.Email)
-	if err != nil && err != gorm.ErrRecordNotFound {
-		return "", err
-	}
-	if user_d != nil && user_d.HashedPassword != "" {
-		return "", gorm.ErrRegistered
-	}
-	if user_d.HashedPassword == "" {
-		user.ID = user_d.ID
-		if err := s.repo.Update(ctx, user); err != nil {
+	if user_d != nil {
+		if err != nil && err != gorm.ErrRecordNotFound {
 			return "", err
 		}
-	} else {
-		if err := s.repo.Create(ctx, user); err != nil {
-			return "", err
+		if user_d.HashedPassword != "" {
+			return "", gorm.ErrRegistered
+		}
+		if user_d.HashedPassword == "" {
+			user.ID = user_d.ID
+			if err := s.repo.Update(ctx, user); err != nil {
+				return "", err
+			}
+		} else {
+			if err := s.repo.Create(ctx, user); err != nil {
+				return "", err
+			}
 		}
 	}
-
 	// Map domain user to model for JWT generation (as current JWT helper expects model)
 	// Ideally, the JWT helper should take a domain entity or a generic interface.
 	userModel := models.UserModel{
