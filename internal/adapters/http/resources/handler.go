@@ -485,13 +485,13 @@ func (h *Handler) BulkCreate(c *gin.Context) {
 		return
 	}
 
-	var req []map[string]interface{}
+	var req map[string]interface{}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "message": err.Error()})
 		return
 	}
 
-	res, err := h.uc.BulkCreateRecords(c.Request.Context(), orgID, uint(collID), userID, req)
+	res, err := h.uc.BulkCreateRecords(c.Request.Context(), orgID, uint(collID), userID, req["records"].([]map[string]interface{}))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

@@ -17,3 +17,11 @@ type User struct {
 	DateOfBirth    time.Time `json:"date_of_birth"`
 	LastLoginAt    time.Time `json:"last_login_at"`
 }
+
+type RefreshToken struct {
+	ID        uint
+	UserID    uint
+	TokenHash string
+	ExpiresAt int64
+	Revoked   bool
+}

@@ -54,6 +54,44 @@ func (r *gormRepository) Update(ctx context.Context, user *domain.User) error {
 	return r.db.WithContext(ctx).Save(model).Error
 }
 
+func (r *gormRepository) SaveRefreshToken(ctx context.Context, token *domain.RefreshToken) error {
+	model := &models.RefreshToken{
+		UserID:    token.UserID,
+		TokenHash: token.TokenHash,
+		ExpiresAt: token.ExpiresAt,
+		Revoked:   false,
+	}
+	return r.db.WithContext(ctx).Create(model).Error
+}
+
+func (r *gormRepository) GetRefreshToken(ctx context.Context, tokenHash string) (*domain.RefreshToken, error) {
+	var model models.RefreshToken
+	if err := r.db.WithContext(ctx).Where("token_hash = ?", tokenHash).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return &domain.RefreshToken{
+		ID:        model.ID,
+		UserID:    model.UserID,
+		TokenHash: model.TokenHash,
+		ExpiresAt: model.ExpiresAt,
+		Revoked:   model.Revoked,
+	}, nil
+}
+
+func (r *gormRepository) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
+	return r.db.WithContext(ctx).
+		Model(&models.RefreshToken{}).
+		Where("token_hash = ?", tokenHash).
+		Update("revoked", true).Error
+}
+
+func (r *gormRepository) RevokeAllUserRefreshTokens(ctx context.Context, userID uint) error {
+	return r.db.WithContext(ctx).
+		Model(&models.RefreshToken{}).
+		Where("user_id = ? AND revoked = false", userID).
+		Update("revoked", true).Error
+}
+
 func toModel(u *domain.User) *models.UserModel {
 	model := &models.UserModel{
 		FirstName:      u.FirstName,

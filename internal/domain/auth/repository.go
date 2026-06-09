@@ -9,4 +9,9 @@ type Repository interface {
 	GetByPhoneNumber(ctx context.Context, phone string) (*User, error)
 	GetByID(ctx context.Context, id uint) (*User, error)
 	Update(ctx context.Context, user *User) error
+
+	SaveRefreshToken(ctx context.Context, token *RefreshToken) error
+	GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error)
+	RevokeRefreshToken(ctx context.Context, tokenHash string) error
+	RevokeAllUserRefreshTokens(ctx context.Context, userID uint) error
 }

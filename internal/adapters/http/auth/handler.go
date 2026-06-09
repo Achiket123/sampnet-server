@@ -44,14 +44,18 @@ func (h *Handler) SignUp(c *gin.Context) {
 		ProfilePic:  req.ProfilePic,
 	}
 
-	token, err := h.uc.SignUp(c.Request.Context(), user, req.Password)
+	pair, err := h.uc.SignUp(c.Request.Context(), user, req.Password)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign up", "message": err.Error()})
 		return
 	}
 
-	c.Header("Authorization", token)
-	c.JSON(http.StatusOK, gin.H{"message": "User created successfully"})
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "User created successfully",
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
 }
 
 func (h *Handler) SignIn(c *gin.Context) {
@@ -63,7 +67,7 @@ func (h *Handler) SignIn(c *gin.Context) {
 		return
 	}
 
-	token, err := h.uc.SignIn(c.Request.Context(), email, password)
+	pair, err := h.uc.SignIn(c.Request.Context(), email, password)
 	if err != nil {
 		if errors.Is(err, usecase.ErrInvalidCredentials) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
@@ -73,8 +77,12 @@ func (h *Handler) SignIn(c *gin.Context) {
 		return
 	}
 
-	c.Header("Authorization", token)
-	c.JSON(http.StatusOK, gin.H{"message": "Sign in successful"})
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Sign in successful",
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
 }
 
 func (h *Handler) CompleteSignIn(c *gin.Context) {
@@ -92,7 +100,7 @@ func (h *Handler) CompleteSignIn(c *gin.Context) {
 		return
 	}
 
-	token, err := h.uc.CompleteSignIn(c.Request.Context(), req.Email, req.PhoneNumber, req.Password, req.City, req.Country, req.ProfilePic)
+	pair, err := h.uc.CompleteSignIn(c.Request.Context(), req.Email, req.PhoneNumber, req.Password, req.City, req.Country, req.ProfilePic)
 	if err != nil {
 		if errors.Is(err, usecase.ErrUserNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -102,15 +110,15 @@ func (h *Handler) CompleteSignIn(c *gin.Context) {
 		return
 	}
 
-	c.Header("Authorization", token)
-	c.JSON(http.StatusOK, gin.H{"message": "User updated successfully"})
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "User updated successfully",
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
 }
 
 func (h *Handler) ValidateEmployee(c *gin.Context) {
-	// Assuming userID is in the token and middleware already validated it
-	// In the original code, it decoded the token to get userID.
-	// We can use a value set in the context by the ValidateToken middleware.
-	
 	userIDVal, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
@@ -131,4 +139,49 @@ func (h *Handler) ValidateEmployee(c *gin.Context) {
 
 	c.Header("Authorization", token)
 	c.JSON(http.StatusOK, gin.H{"message": "Employee validated successfully"})
+}
+
+func (h *Handler) RefreshToken(c *gin.Context) {
+	var req struct {
+		RefreshToken string `json:"refresh_token" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	pair, err := h.uc.RefreshToken(c.Request.Context(), req.RefreshToken)
+	if err != nil {
+		if errors.Is(err, usecase.ErrInvalidToken) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired refresh token"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to refresh token"})
+		return
+	}
+
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
+}
+
+func (h *Handler) Logout(c *gin.Context) {
+	var req struct {
+		RefreshToken string `json:"refresh_token" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.uc.Logout(c.Request.Context(), req.RefreshToken); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to logout"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }

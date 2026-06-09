@@ -1,6 +1,9 @@
 package miscallenous
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"time"
@@ -9,7 +12,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// generateJWTToken creates a new JWT token for the given user.
+// GenerateJWTToken creates a short-lived access token (15 minutes).
 func GenerateJWTToken(object any, tokenName string, ID uint) (string, error) {
 	if ID == 0 {
 		return "", errors.New("ID must be greater than 0")
@@ -17,7 +20,7 @@ func GenerateJWTToken(object any, tokenName string, ID uint) (string, error) {
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		tokenName: object,
 		"sub":     ID,
-		"exp":     time.Now().Add(time.Hour * 24 * 30).Unix(), // Expiration time (30 days from now)
+		"exp":     time.Now().Add(15 * time.Minute).Unix(),
 	}).SignedString([]byte(os.Getenv("SECRET")))
 }
 
@@ -28,11 +31,9 @@ func DecodeJWTToken(tokenString string) (*jwt.Token, error) {
 		}
 		return []byte(os.Getenv("SECRET")), nil
 	}
-
 	return jwt.Parse(tokenString, keyFunc)
 }
 
-// hashPassword hashes the given password using bcrypt.
 func HashPassword(password string) (string, error) {
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -43,4 +44,21 @@ func HashPassword(password string) (string, error) {
 
 func VerifyPassword(hashedPassword string, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)) == nil
+}
+
+func GenerateRefreshToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func HashRefreshToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+func RefreshTokenExpiresAt() int64 {
+	return time.Now().Add(30 * 24 * time.Hour).Unix()
 }
