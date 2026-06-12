@@ -437,13 +437,17 @@ func (h *Handler) UpdateUserProfile(c *gin.Context) {
 		return
 	}
 
-	dob, err := time.Parse(time.RFC3339, req.DateOfBirth)
-	if err != nil {
-		// Fallback to simple date format if parse fails
-		dob, err = time.Parse("2006-01-02", req.DateOfBirth)
+	var dob time.Time
+	if req.DateOfBirth != "" {
+		var err error
+		dob, err = time.Parse(time.RFC3339, req.DateOfBirth)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid date of birth format, use YYYY-MM-DD or RFC3339"})
-			return
+			// Fallback to simple date format if parse fails
+			dob, err = time.Parse("2006-01-02", req.DateOfBirth)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid date of birth format, use YYYY-MM-DD or RFC3339"})
+				return
+			}
 		}
 	}
 
@@ -456,7 +460,7 @@ func (h *Handler) UpdateUserProfile(c *gin.Context) {
 		DateOfBirth: dob,
 	}
 
-	err = h.uc.UpdateUserProfile(userID, &profile)
+	err := h.uc.UpdateUserProfile(userID, &profile)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
