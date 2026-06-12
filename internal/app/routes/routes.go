@@ -25,6 +25,7 @@ import (
 	calendarHTTP "server/internal/adapters/http/calendar"
 	researchHTTP "server/internal/adapters/http/research"
 	peopleHTTP "server/internal/adapters/http/people"
+	settingsHTTP "server/internal/adapters/http/settings"
 	analyticsRepo "server/internal/adapters/repository/analytics"
 	attendanceRepo "server/internal/adapters/repository/attendance"
 	authRepo "server/internal/adapters/repository/auth"
@@ -48,6 +49,7 @@ import (
 	calendarRepo "server/internal/adapters/repository/calendar"
 	researchRepo "server/internal/adapters/repository/research"
 	peopleRepo "server/internal/adapters/repository/people"
+	settingsRepo "server/internal/adapters/repository/settings"
 	"server/internal/platform/database"
 	"server/internal/platform/middlewares"
 	mailerPlatform "server/internal/platform/mailer"
@@ -76,6 +78,7 @@ import (
 	calendarService "server/internal/usecase/calendar"
 	researchService "server/internal/usecase/research"
 	peopleService "server/internal/usecase/people"
+	settingsService "server/internal/usecase/settings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -211,4 +214,9 @@ func SetupRoutes(r *gin.Engine) {
 	// Ensure Boss or Manager role for analytics
 	roleMiddleware := middlewares.RoleMiddleware([]string{"boss", "manager"})
 	analyticsHTTP.RegisterRoutes(r, analyticsHandler, validateToken, roleMiddleware)
+
+	settingsRepository := settingsRepo.NewGormRepository(database.DB)
+	settingsUseCase := settingsService.NewUseCase(settingsRepository)
+	settingsHandler := settingsHTTP.NewHandler(settingsUseCase)
+	settingsHTTP.RegisterRoutes(r, settingsHandler, validateToken)
 }

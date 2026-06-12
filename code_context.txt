@@ -1,6 +1,6 @@
 # Code Context
-# Generated: 2026-06-09T17:08:03+05:30
-# Files: 236
+# Generated: 2026-06-12T15:16:15+05:30
+# Files: 237
 #
 # To extract all files back to disk, run:
 #   awk '/^BEGIN_FILE:/{f=substr($0,11); sub(/^:/, "", f); next} /^END_FILE:/{f=""; next} f{print > f}' code_context.txt
@@ -3738,7 +3738,7 @@ func (h *Handler) Export(c *gin.Context) {
 	})
 }
 END_FILE:internal/adapters/http/resources/handler.go
-# path: internal/app/routes/routes.go | lang: go | tokens: 2600 | size: 10403
+# path: internal/app/routes/routes.go | lang: go | tokens: 2739 | size: 10957
 # functions: SetupRoutes
 BEGIN_FILE:internal/app/routes/routes.go
 package routes
@@ -3751,6 +3751,7 @@ import (
 	callStateHTTP "server/internal/adapters/http/callstate"
 	chatHTTP "server/internal/adapters/http/chats"
 	employeeHTTP "server/internal/adapters/http/employees"
+	inviteHTTP "server/internal/adapters/http/invites"
 	fileHTTP "server/internal/adapters/http/files"
 	leaveHTTP "server/internal/adapters/http/leave"
 	messageHTTP "server/internal/adapters/http/messages"
@@ -3773,6 +3774,7 @@ import (
 	callStateRepo "server/internal/adapters/repository/callstate"
 	chatRepo "server/internal/adapters/repository/chats"
 	employeeRepo "server/internal/adapters/repository/employees"
+	inviteRepo "server/internal/adapters/repository/invites"
 	fileRepo "server/internal/adapters/repository/files"
 	leaveRepo "server/internal/adapters/repository/leave"
 	messageRepo "server/internal/adapters/repository/messages"
@@ -3791,6 +3793,7 @@ import (
 	peopleRepo "server/internal/adapters/repository/people"
 	"server/internal/platform/database"
 	"server/internal/platform/middlewares"
+	mailerPlatform "server/internal/platform/mailer"
 	"server/internal/platform/websocket"
 	analyticsService "server/internal/usecase/analytics"
 	attendanceService "server/internal/usecase/attendance"
@@ -3799,6 +3802,7 @@ import (
 	callStateService "server/internal/usecase/callstate"
 	chatService "server/internal/usecase/chats"
 	employeeService "server/internal/usecase/employees"
+	inviteService "server/internal/usecase/invites"
 	fileService "server/internal/usecase/files"
 	leaveService "server/internal/usecase/leave"
 	messageService "server/internal/usecase/messages"
@@ -3848,15 +3852,21 @@ func SetupRoutes(r *gin.Engine) {
 	organisationHandler := organisationHTTP.NewHandler(organisationService)
 	organisationHTTP.RegisterRoutes(r, organisationHandler, validateToken)
 
+	gmailMailer := mailerPlatform.NewGmailMailer()
 	authRepository := authRepo.NewGormRepository(database.DB)
 	empRepository := employeeRepo.NewGormRepository(database.DB)
-	authUseCase := authService.NewService(authRepository, empRepository)
+	authUseCase := authService.NewService(authRepository, empRepository, gmailMailer)
 	authHandler := authHTTP.NewHandler(authUseCase)
 	authHTTP.RegisterRoutes(r, authHandler, validateToken)
 
 	employeeUseCase := employeeService.NewService(empRepository, authRepository, organisationRepository)
 	employeeHandler := employeeHTTP.NewHandler(employeeUseCase)
 	employeeHTTP.RegisterRoutes(r, employeeHandler, validateToken)
+
+	inviteRepository := inviteRepo.NewGormRepository(database.DB)
+	inviteUseCase := inviteService.NewService(inviteRepository, authRepository, empRepository, gmailMailer)
+	inviteHandler := inviteHTTP.NewHandler(inviteUseCase)
+	inviteHTTP.RegisterRoutes(r, inviteHandler, validateToken)
 
 	taskRepository := taskRepo.NewGormRepository(database.DB)
 	taskUseCase := taskService.NewService(taskRepository, notificationUseCase)
@@ -3946,12 +3956,13 @@ func SetupRoutes(r *gin.Engine) {
 	analyticsHTTP.RegisterRoutes(r, analyticsHandler, validateToken, roleMiddleware)
 }
 END_FILE:internal/app/routes/routes.go
-# path: internal/adapters/http/employees/handler.go | lang: go | tokens: 2567 | size: 10269
+# path: internal/adapters/http/employees/handler.go | lang: go | tokens: 2612 | size: 10448
 # functions: NewHandler, getUserAuthInfo
 BEGIN_FILE:internal/adapters/http/employees/handler.go
 package employees
 
 import (
+	"log"
 	"net/http"
 	authDomain "server/internal/domain/auth"
 	domain "server/internal/domain/employees"
@@ -3972,6 +3983,7 @@ func getUserAuthInfo(c *gin.Context) (uint, uint, string, bool) {
 	userIDVal, existsUser := c.Get("userID")
 	orgIDVal, existsOrg := c.Get("organisationID")
 	roleVal, existsRole := c.Get("role")
+	log.Default().Printf("UserID: %v, organisationID: %v, role: %v", userIDVal, orgIDVal, roleVal)
 	if !existsUser || !existsOrg || !existsRole {
 		return 0, 0, "", false
 	}
@@ -3991,7 +4003,7 @@ func (h *Handler) AddEmployee(c *gin.Context) {
 		return
 	}
 
-	if role != "boss" && role != "manager" {
+	if role != "boss" && role != "manager" && role != "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only owners (boss) or managers can add employees"})
 		return
 	}
@@ -4036,7 +4048,7 @@ func (h *Handler) MakeManager(c *gin.Context) {
 		return
 	}
 
-	if role != "boss" && role != "manager" {
+	if role != "boss" && role != "manager" && role != "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only owners (boss) or managers can make a manager"})
 		return
 	}
@@ -4125,7 +4137,7 @@ func (h *Handler) CreateEmployee(c *gin.Context) {
 		return
 	}
 
-	if role != "boss" && role != "manager" {
+	if role != "boss" && role != "manager" && role != "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only owners (boss) or managers can create employees"})
 		return
 	}
@@ -4266,7 +4278,7 @@ func (h *Handler) DeleteEmployee(c *gin.Context) {
 		return
 	}
 
-	if role != "boss" && role != "manager" {
+	if role != "boss" && role != "manager" && role != "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only owners (boss) or managers can delete employees"})
 		return
 	}
@@ -5620,6 +5632,312 @@ func (u *usecase) GetAnalytics(ctx context.Context, orgID uint) (*people.PeopleA
 	return u.repo.GetAnalytics(ctx, orgID)
 }
 END_FILE:internal/usecase/people/usecase.go
+# path: internal/usecase/auth/usecase.go | lang: go | tokens: 2256 | size: 9025
+# functions: NewService
+BEGIN_FILE:internal/usecase/auth/usecase.go
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	domain "server/internal/domain/auth"
+	empDomain "server/internal/domain/employees"
+	"server/internal/platform/database/models"
+	mailerPlatform "server/internal/platform/mailer"
+	"server/internal/platform/miscallenous"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+var (
+	ErrUserAlreadyExists  = errors.New("user already exists")
+	ErrInvalidCredentials = errors.New("invalid email or password")
+	ErrUserNotFound       = errors.New("user not found")
+	ErrNotAnEmployee      = errors.New("user is not an employee")
+	ErrInvalidToken       = errors.New("invalid or expired refresh token")
+	ErrInvitePending      = errors.New("please accept your invitation to set your password")
+)
+
+type service struct {
+	repo    domain.Repository
+	empRepo empDomain.Repository
+	mailer  mailerPlatform.Mailer
+}
+
+func NewService(repo domain.Repository, empRepo empDomain.Repository, mailer mailerPlatform.Mailer) domain.UseCase {
+	return &service{repo: repo, empRepo: empRepo, mailer: mailer}
+}
+
+func (s *service) SignUp(ctx context.Context, user *domain.User, password string) (domain.TokenPair, error) {
+	hashedPassword, err := miscallenous.HashPassword(password)
+	if err != nil {
+		return domain.TokenPair{}, err
+	}
+	user.HashedPassword = hashedPassword
+	user.LastLoginAt = time.Now()
+
+	existing, err := s.repo.GetByEmail(ctx, user.Email)
+	if existing != nil {
+		if err != nil && err != gorm.ErrRecordNotFound {
+			return domain.TokenPair{}, err
+		}
+		if existing.HashedPassword != "" {
+			return domain.TokenPair{}, gorm.ErrRegistered
+		}
+		user.ID = existing.ID
+		if err := s.repo.Update(ctx, user); err != nil {
+			return domain.TokenPair{}, err
+		}
+	} else {
+		if err := s.repo.Create(ctx, user); err != nil {
+			return domain.TokenPair{}, err
+		}
+	}
+
+	return s.issueTokenPair(ctx, user)
+}
+
+func (s *service) SignIn(ctx context.Context, email, password string) (domain.TokenPair, error) {
+	user, err := s.repo.GetByEmail(ctx, email)
+	if err != nil {
+		return domain.TokenPair{}, ErrInvalidCredentials
+	}
+
+	if user.HashedPassword == "" {
+		return domain.TokenPair{}, ErrInvitePending
+	}
+
+	if !miscallenous.VerifyPassword(user.HashedPassword, password) {
+		return domain.TokenPair{}, ErrInvalidCredentials
+	}
+
+	return s.issueTokenPair(ctx, user)
+}
+
+func (s *service) CompleteSignIn(ctx context.Context, email, phone, password, city, country, profilePic string) (domain.TokenPair, error) {
+	user, err := s.repo.GetByEmail(ctx, email)
+	if err != nil {
+		user, err = s.repo.GetByPhoneNumber(ctx, phone)
+		if err != nil {
+			return domain.TokenPair{}, ErrUserNotFound
+		}
+	}
+
+	hashedPassword, err := miscallenous.HashPassword(password)
+	if err != nil {
+		return domain.TokenPair{}, err
+	}
+
+	user.HashedPassword = hashedPassword
+	user.City = city
+	user.Country = country
+	user.ProfilePic = profilePic
+	user.IsVerified = true
+	user.LastLoginAt = time.Now()
+
+	if err := s.repo.Update(ctx, user); err != nil {
+		return domain.TokenPair{}, err
+	}
+
+	return s.issueTokenPair(ctx, user)
+}
+
+func (s *service) ValidateEmployee(ctx context.Context, userID uint) (string, error) {
+	employee, err := s.empRepo.GetByUserID(ctx, userID)
+	if err != nil {
+		return "", ErrNotAnEmployee
+	}
+
+	empModel := models.Employee{
+		UserID:         employee.UserID,
+		OrganisationID: employee.OrganisationID,
+		Type:           employee.Type,
+	}
+
+	token, err := miscallenous.GenerateJWTToken(empModel, "employee", employee.UserID)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+func (s *service) RefreshToken(ctx context.Context, rawRefreshToken string) (domain.TokenPair, error) {
+	tokenHash := miscallenous.HashRefreshToken(rawRefreshToken)
+
+	stored, err := s.repo.GetRefreshToken(ctx, tokenHash)
+	if err != nil || stored == nil {
+		return domain.TokenPair{}, ErrInvalidToken
+	}
+
+	if stored.Revoked {
+		// Token reuse detected — revoke all tokens for this user (rotation breach)
+		_ = s.repo.RevokeAllUserRefreshTokens(ctx, stored.UserID)
+		return domain.TokenPair{}, ErrInvalidToken
+	}
+
+	if stored.ExpiresAt < time.Now().Unix() {
+		return domain.TokenPair{}, ErrInvalidToken
+	}
+
+	// Revoke old token before issuing new pair
+	if err := s.repo.RevokeRefreshToken(ctx, tokenHash); err != nil {
+		return domain.TokenPair{}, err
+	}
+
+	user, err := s.repo.GetByID(ctx, stored.UserID)
+	if err != nil {
+		return domain.TokenPair{}, ErrUserNotFound
+	}
+
+	return s.issueTokenPair(ctx, user)
+}
+
+func (s *service) Logout(ctx context.Context, rawRefreshToken string) error {
+	tokenHash := miscallenous.HashRefreshToken(rawRefreshToken)
+	return s.repo.RevokeRefreshToken(ctx, tokenHash)
+}
+
+// issueTokenPair generates a new access + refresh token pair and persists the refresh token.
+func (s *service) issueTokenPair(ctx context.Context, user *domain.User) (domain.TokenPair, error) {
+	userModel := models.UserModel{
+		FirstName:  user.FirstName,
+		LastName:   user.LastName,
+		Email:      user.Email,
+		IsVerified: user.IsVerified,
+	}
+	userModel.ID = user.ID
+
+	log.Default().Printf("Issuing token pair for user %d", user.ID)
+
+	accessToken, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
+	if err != nil {
+		return domain.TokenPair{}, err
+	}
+
+	rawRefresh, err := miscallenous.GenerateRefreshToken()
+	if err != nil {
+		return domain.TokenPair{}, err
+	}
+
+	refreshRecord := &domain.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: miscallenous.HashRefreshToken(rawRefresh),
+		ExpiresAt: miscallenous.RefreshTokenExpiresAt(),
+		Revoked:   false,
+	}
+
+	if err := s.repo.SaveRefreshToken(ctx, refreshRecord); err != nil {
+		return domain.TokenPair{}, err
+	}
+
+	return domain.TokenPair{
+		AccessToken:  accessToken,
+		RefreshToken: rawRefresh, // send raw; only hash is stored in DB
+	}, nil
+}
+
+func (s *service) SendVerificationEmail(ctx context.Context, userID uint) error {
+	user, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return ErrUserNotFound
+	}
+
+	if user.IsVerified {
+		return errors.New("user is already verified")
+	}
+
+	var token string
+	active, err := s.repo.GetActiveEmailVerificationByUserID(ctx, userID)
+	if err == nil && active != nil {
+		token = active.Token
+	} else {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		token = hex.EncodeToString(b)
+		ev := &domain.EmailVerification{
+			UserID:    userID,
+			Token:     token,
+			ExpiresAt: time.Now().Add(24 * time.Hour),
+		}
+		if err := s.repo.CreateEmailVerification(ctx, ev); err != nil {
+			return err
+		}
+	}
+
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "https://sampnet.achiket.site"
+	}
+	verificationURL := fmt.Sprintf("%s/verify-email-landing?token=%s", frontendURL, token)
+
+	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; margin: 0; padding: 20px;">
+  <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+    <h2 style="color: #2c3e50; border-bottom: 2px solid #e74c3c; padding-bottom: 10px; margin-top: 0;">Verify Your Email Address</h2>
+    <p>Hello %s,</p>
+    <p>Thank you for signing up! Please verify your email address by clicking the button below:</p>
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="%s" style="background-color: #e74c3c; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 4px; font-weight: bold; display: inline-block;">Verify Email</a>
+    </div>
+    <p style="font-size: 0.9em; color: #7f8c8d;">If the button doesn't work, copy and paste this link into your web browser:</p>
+    <p style="font-size: 0.9em; word-break: break-all; color: #e74c3c;"><a href="%s" style="color: #e74c3c;">%s</a></p>
+    <hr style="border: 0; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
+    <p style="font-size: 0.8em; color: #95a5a6; text-align: center;">This link will expire in <strong>24 hours</strong>.</p>
+  </div>
+</body>
+</html>`, user.FirstName, verificationURL, verificationURL, verificationURL)
+
+	return s.mailer.SendMail(user.Email, "Verify your email address", htmlBody)
+}
+
+func (s *service) VerifyEmail(ctx context.Context, token string) error {
+	ev, err := s.repo.GetEmailVerificationByToken(ctx, token)
+	if err != nil {
+		return errors.New("invalid or expired verification token")
+	}
+
+	if ev.UsedAt != nil {
+		return errors.New("this verification token has already been used")
+	}
+
+	if time.Now().After(ev.ExpiresAt) {
+		return errors.New("this verification token has expired")
+	}
+
+	user, err := s.repo.GetByID(ctx, ev.UserID)
+	if err != nil {
+		return ErrUserNotFound
+	}
+
+	user.IsVerified = true
+	if err := s.repo.Update(ctx, user); err != nil {
+		return err
+	}
+
+	now := time.Now()
+	ev.UsedAt = &now
+	return s.repo.UpdateEmailVerification(ctx, ev)
+}
+
+func (s *service) GetMe(ctx context.Context, userID uint) (domain.TokenPair, error) {
+	user, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return domain.TokenPair{}, ErrUserNotFound
+	}
+	return s.issueTokenPair(ctx, user)
+}
+
+END_FILE:internal/usecase/auth/usecase.go
 # path: internal/adapters/http/people/handler.go | lang: go | tokens: 2198 | size: 8795
 # functions: NewHandler, getOrgAndUser, parseFilter
 BEGIN_FILE:internal/adapters/http/people/handler.go
@@ -6451,6 +6769,278 @@ func toEmployeeDomain(m *models.Employee) employees.Employee {
 	}
 }
 END_FILE:internal/adapters/repository/analytics/gorm_repository.go
+# path: internal/adapters/http/auth/handler.go | lang: go | tokens: 1835 | size: 7341
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/auth/handler.go
+package auth
+
+import (
+	"encoding/json"
+	"errors"
+	"log"
+	"net/http"
+	domain "server/internal/domain/auth"
+	usecase "server/internal/usecase/auth"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) SignUp(c *gin.Context) {
+	/*
+			 "email": email,
+		      "password": hashedPassword,
+		      "first_name": firstName,
+		      "last_name": lastName,
+		      "phone_number": phoneNumber,
+		      "profile_pic": profilePic.toString(),
+		      "city": city,
+		      "country": country,
+		      "date_of_birth": dateOfBirth.toIso8601String(),
+	*/
+	var req struct {
+		FirstName   string `json:"first_name" `
+		LastName    string `json:"last_name" `
+		Email       string `json:"email" `
+		Password    string `json:"password" `
+		City        string `json:"city"`
+		Country     string `json:"country"`
+		PhoneNumber string `json:"phone_number" `
+		ProfilePic  string `json:"profile_pic"`
+	}
+
+	body := map[string]any{}
+	body_buf, err := json.MarshalIndent(body, "	", "		")
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Error"})
+		return
+	}
+
+	log.Default().Println(string(body_buf))
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Println(err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	user := &domain.User{
+		FirstName:   req.FirstName,
+		LastName:    req.LastName,
+		Email:       req.Email,
+		City:        req.City,
+		Country:     req.Country,
+		PhoneNumber: req.PhoneNumber,
+		ProfilePic:  req.ProfilePic,
+	}
+
+	pair, err := h.uc.SignUp(c.Request.Context(), user, req.Password)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign up", "message": err.Error()})
+		return
+	}
+
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "User created successfully",
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
+}
+
+func (h *Handler) SignIn(c *gin.Context) {
+	var req struct {
+		Email    string `form:"email" `
+		Password string `form:"password" `
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Println(err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	email := req.Email
+	password := req.Password
+	pair, err := h.uc.SignIn(c.Request.Context(), email, password)
+	if err != nil {
+		if errors.Is(err, usecase.ErrInvitePending) {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, usecase.ErrInvalidCredentials) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign in", "message": err.Error()})
+		return
+	}
+
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Sign in successful",
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
+}
+
+func (h *Handler) CompleteSignIn(c *gin.Context) {
+	var req struct {
+		Email       string `json:"email" binding:"required,email"`
+		PhoneNumber string `json:"phone_number" binding:"required"`
+		Password    string `json:"password" binding:"required"`
+		City        string `json:"city" binding:"required"`
+		Country     string `json:"country" binding:"required"`
+		ProfilePic  string `json:"profile_pic" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	pair, err := h.uc.CompleteSignIn(c.Request.Context(), req.Email, req.PhoneNumber, req.Password, req.City, req.Country, req.ProfilePic)
+	if err != nil {
+		if errors.Is(err, usecase.ErrUserNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete sign in"})
+		return
+	}
+
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "User updated successfully",
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
+}
+
+func (h *Handler) ValidateEmployee(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	userID := userIDVal.(uint)
+
+	token, err := h.uc.ValidateEmployee(c.Request.Context(), userID)
+	if err != nil {
+		if errors.Is(err, usecase.ErrNotAnEmployee) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate employee"})
+		return
+	}
+
+	c.Header("Authorization", token)
+	c.JSON(http.StatusOK, gin.H{"message": "Employee validated successfully"})
+}
+
+func (h *Handler) RefreshToken(c *gin.Context) {
+	var req struct {
+		RefreshToken string `json:"refresh_token" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	pair, err := h.uc.RefreshToken(c.Request.Context(), req.RefreshToken)
+	if err != nil {
+		if errors.Is(err, usecase.ErrInvalidToken) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired refresh token"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to refresh token"})
+		return
+	}
+
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
+}
+
+func (h *Handler) Logout(c *gin.Context) {
+	var req struct {
+		RefreshToken string `json:"refresh_token" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.uc.Logout(c.Request.Context(), req.RefreshToken); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to logout"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
+}
+
+func (h *Handler) SendVerificationEmail(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	userID := userIDVal.(uint)
+
+	if err := h.uc.SendVerificationEmail(c.Request.Context(), userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Verification email sent successfully"})
+}
+
+func (h *Handler) VerifyEmail(c *gin.Context) {
+	token := c.Query("token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Verification token is required"})
+		return
+	}
+
+	if err := h.uc.VerifyEmail(c.Request.Context(), token); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Email verified successfully"})
+}
+
+func (h *Handler) GetMe(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	userID := userIDVal.(uint)
+
+	pair, err := h.uc.GetMe(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
+}
+END_FILE:internal/adapters/http/auth/handler.go
 # path: internal/adapters/http/leave/handler.go | lang: go | tokens: 1752 | size: 7009
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/leave/handler.go
@@ -6920,6 +7510,196 @@ func toDomainList(modelsList []models.Project) []domain.Project {
 }
 
 END_FILE:internal/adapters/repository/projects/gorm_repository.go
+# path: internal/usecase/invites/usecase.go | lang: go | tokens: 1471 | size: 5885
+# functions: NewService
+BEGIN_FILE:internal/usecase/invites/usecase.go
+package invites
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	authDomain "server/internal/domain/auth"
+	employeesDomain "server/internal/domain/employees"
+	domain "server/internal/domain/invites"
+	"server/internal/platform/database/models"
+	"server/internal/platform/mailer"
+	"server/internal/platform/miscallenous"
+)
+
+type service struct {
+	repo         domain.Repository
+	userRepo     authDomain.Repository
+	employeeRepo employeesDomain.Repository
+	mailer       mailer.Mailer
+}
+
+func NewService(repo domain.Repository, userRepo authDomain.Repository, employeeRepo employeesDomain.Repository, m mailer.Mailer) domain.UseCase {
+	return &service{
+		repo:         repo,
+		userRepo:     userRepo,
+		employeeRepo: employeeRepo,
+		mailer:       m,
+	}
+}
+
+func (s *service) InviteEmployee(ctx context.Context, invite *domain.EmployeeInvite) error {
+	// 1. Check duplicate
+	existing, err := s.repo.GetByEmail(ctx, invite.Email, invite.OrganisationID)
+	if err == nil && existing != nil {
+		return errors.New("an active invitation already exists for this email in the organisation")
+	}
+
+	// 2. Generate secure token
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return err
+	}
+	invite.Token = hex.EncodeToString(b)
+
+	// 3. Set properties
+	invite.Status = "pending"
+	invite.ExpiresAt = time.Now().Add(72 * time.Hour)
+
+	// 4. Persist to DB
+	if err := s.repo.Create(ctx, invite); err != nil {
+		return err
+	}
+
+	// 5. Build accept URL
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "https://sampnet.achiket.site" // fallback default
+	}
+	inviteURL := fmt.Sprintf("%s/accept-invite?token=%s", frontendURL, invite.Token)
+
+	// 6. Build HTML body
+	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; margin: 0; padding: 20px;">
+  <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+    <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-top: 0;">You're Invited!</h2>
+    <p>Hello %s,</p>
+    <p>You have been invited to join the organisation as an employee. Click the button below to set up your account and get started:</p>
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="%s" style="background-color: #3498db; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 4px; font-weight: bold; display: inline-block;">Accept Invitation</a>
+    </div>
+    <p style="font-size: 0.9em; color: #7f8c8d;">If the button doesn't work, copy and paste this link into your web browser:</p>
+    <p style="font-size: 0.9em; word-break: break-all; color: #3498db;"><a href="%s" style="color: #3498db;">%s</a></p>
+    <hr style="border: 0; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
+    <p style="font-size: 0.8em; color: #95a5a6; text-align: center;">This invitation expires in <strong>72 hours</strong>.</p>
+  </div>
+</body>
+</html>`, invite.FirstName, inviteURL, inviteURL, inviteURL)
+
+	// 7. Send the email
+	err = s.mailer.SendMail(invite.Email, "You're invited", htmlBody)
+	log.Default().Println(err)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *service) AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error) {
+	// 1. Look up invite
+	invite, err := s.repo.GetByToken(ctx, token)
+	if err != nil {
+		return authDomain.TokenPair{}, errors.New("invalid or expired invitation link")
+	}
+
+	// 2. Validate state
+	if invite.Status != "pending" {
+		return authDomain.TokenPair{}, errors.New("this invitation has already been used")
+	}
+	if time.Now().After(invite.ExpiresAt) {
+		return authDomain.TokenPair{}, errors.New("this invitation has expired")
+	}
+
+	// 3. Check if user already exists
+	var user *authDomain.User
+	hashed, errPassword := miscallenous.HashPassword(password)
+	if errPassword != nil {
+		return authDomain.TokenPair{}, errPassword
+	}
+
+	existingUser, err := s.userRepo.GetByEmail(ctx, invite.Email)
+	if err != nil {
+		// User does not exist — create them
+		user = &authDomain.User{
+			FirstName:      invite.FirstName,
+			LastName:       invite.LastName,
+			Email:          invite.Email,
+			PhoneNumber:    invite.PhoneNumber,
+			HashedPassword: hashed,
+			IsVerified:     true,
+		}
+	} else {
+		// User exists — update verification status and password
+		user = existingUser
+		user.HashedPassword = hashed
+		user.IsVerified = true
+	}
+
+	// 4. Build employee record
+	employee := &employeesDomain.Employee{
+		UserID:         user.ID,
+		OrganisationID: invite.OrganisationID,
+		EmploymentID:   invite.EmploymentID,
+		Email:          invite.Email,
+	}
+
+	// 5. Delegate atomically
+	if err := s.repo.AcceptInvite(ctx, invite.ID, user, employee); err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	// 6. Generate token pair
+	userModel := models.UserModel{
+		FirstName:  user.FirstName,
+		LastName:   user.LastName,
+		Email:      user.Email,
+		IsVerified: user.IsVerified,
+	}
+	userModel.ID = user.ID
+
+	accessToken, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
+	if err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	rawRefresh, err := miscallenous.GenerateRefreshToken()
+	if err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	refreshRecord := &authDomain.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: miscallenous.HashRefreshToken(rawRefresh),
+		ExpiresAt: miscallenous.RefreshTokenExpiresAt(),
+		Revoked:   false,
+	}
+
+	if err := s.userRepo.SaveRefreshToken(ctx, refreshRecord); err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	return authDomain.TokenPair{
+		AccessToken:  accessToken,
+		RefreshToken: rawRefresh,
+	}, nil
+}
+
+func (s *service) GetInvitesByOrg(ctx context.Context, orgID uint) ([]domain.EmployeeInvite, error) {
+	return s.repo.GetByOrg(ctx, orgID)
+}
+END_FILE:internal/usecase/invites/usecase.go
 # path: internal/adapters/repository/employees/gorm_repository.go | lang: go | tokens: 1440 | size: 5762
 # functions: NewGormRepository, toModel, toDomain
 BEGIN_FILE:internal/adapters/repository/employees/gorm_repository.go
@@ -7453,6 +8233,193 @@ func toDomainList(modelsList []models.Task) []domain.Task {
 	return result
 }
 END_FILE:internal/adapters/repository/tasks/gorm_repository.go
+# path: internal/adapters/repository/auth/gorm_repository.go | lang: go | tokens: 1288 | size: 5153
+# functions: NewGormRepository, toModel, toDomain, toEvModel, toEvDomain
+BEGIN_FILE:internal/adapters/repository/auth/gorm_repository.go
+package auth
+
+import (
+	"context"
+	domain "server/internal/domain/auth"
+	"server/internal/platform/database/models"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, user *domain.User) error {
+	model := toModel(user)
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	user.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
+	var model models.UserModel
+	if err := r.db.WithContext(ctx).Where("email = ?", email).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) GetByPhoneNumber(ctx context.Context, phone string) (*domain.User, error) {
+	var model models.UserModel
+	if err := r.db.WithContext(ctx).Where("phone_number = ?", phone).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.User, error) {
+	var model models.UserModel
+	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, user *domain.User) error {
+	model := toModel(user)
+	return r.db.WithContext(ctx).Save(model).Error
+}
+
+func (r *gormRepository) SaveRefreshToken(ctx context.Context, token *domain.RefreshToken) error {
+	model := &models.RefreshToken{
+		UserID:    token.UserID,
+		TokenHash: token.TokenHash,
+		ExpiresAt: token.ExpiresAt,
+		Revoked:   false,
+	}
+	return r.db.WithContext(ctx).Create(model).Error
+}
+
+func (r *gormRepository) GetRefreshToken(ctx context.Context, tokenHash string) (*domain.RefreshToken, error) {
+	var model models.RefreshToken
+	if err := r.db.WithContext(ctx).Where("token_hash = ?", tokenHash).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return &domain.RefreshToken{
+		ID:        model.ID,
+		UserID:    model.UserID,
+		TokenHash: model.TokenHash,
+		ExpiresAt: model.ExpiresAt,
+		Revoked:   model.Revoked,
+	}, nil
+}
+
+func (r *gormRepository) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
+	return r.db.WithContext(ctx).
+		Model(&models.RefreshToken{}).
+		Where("token_hash = ?", tokenHash).
+		Update("revoked", true).Error
+}
+
+func (r *gormRepository) RevokeAllUserRefreshTokens(ctx context.Context, userID uint) error {
+	return r.db.WithContext(ctx).
+		Model(&models.RefreshToken{}).
+		Where("user_id = ? AND revoked = false", userID).
+		Update("revoked", true).Error
+}
+
+func toModel(u *domain.User) *models.UserModel {
+	model := &models.UserModel{
+		FirstName:      u.FirstName,
+		LastName:       u.LastName,
+		Email:          u.Email,
+		PhoneNumber:    u.PhoneNumber,
+		IsVerified:     u.IsVerified,
+		HashedPassword: u.HashedPassword,
+		ProfilePic:     u.ProfilePic,
+		City:           u.City,
+		Country:        u.Country,
+		DateOfBirth:    u.DateOfBirth,
+		LastLoginAt:    u.LastLoginAt,
+	}
+	model.ID = u.ID
+	return model
+}
+
+func toDomain(m *models.UserModel) *domain.User {
+	return &domain.User{
+		ID:             m.ID,
+		FirstName:      m.FirstName,
+		LastName:       m.LastName,
+		Email:          m.Email,
+		PhoneNumber:    m.PhoneNumber,
+		IsVerified:     m.IsVerified,
+		HashedPassword: m.HashedPassword,
+		ProfilePic:     m.ProfilePic,
+		City:           m.City,
+		Country:        m.Country,
+		DateOfBirth:    m.DateOfBirth,
+		LastLoginAt:    m.LastLoginAt,
+	}
+}
+
+func (r *gormRepository) CreateEmailVerification(ctx context.Context, ev *domain.EmailVerification) error {
+	model := toEvModel(ev)
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	ev.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) GetEmailVerificationByToken(ctx context.Context, token string) (*domain.EmailVerification, error) {
+	var model models.EmailVerification
+	if err := r.db.WithContext(ctx).Where("token = ?", token).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return toEvDomain(&model), nil
+}
+
+func (r *gormRepository) GetActiveEmailVerificationByUserID(ctx context.Context, userID uint) (*domain.EmailVerification, error) {
+	var model models.EmailVerification
+	if err := r.db.WithContext(ctx).
+		Where("user_id = ? AND expires_at > ? AND used_at IS NULL", userID, time.Now()).
+		First(&model).Error; err != nil {
+		return nil, err
+	}
+	return toEvDomain(&model), nil
+}
+
+func (r *gormRepository) UpdateEmailVerification(ctx context.Context, ev *domain.EmailVerification) error {
+	model := toEvModel(ev)
+	return r.db.WithContext(ctx).Save(model).Error
+}
+
+func toEvModel(ev *domain.EmailVerification) *models.EmailVerification {
+	model := &models.EmailVerification{
+		UserID:    ev.UserID,
+		Token:     ev.Token,
+		ExpiresAt: ev.ExpiresAt,
+		UsedAt:    ev.UsedAt,
+	}
+	model.ID = ev.ID
+	return model
+}
+
+func toEvDomain(m *models.EmailVerification) *domain.EmailVerification {
+	return &domain.EmailVerification{
+		ID:        m.ID,
+		UserID:    m.UserID,
+		Token:     m.Token,
+		ExpiresAt: m.ExpiresAt,
+		UsedAt:    m.UsedAt,
+	}
+}
+
+END_FILE:internal/adapters/repository/auth/gorm_repository.go
 # path: internal/adapters/repository/calendar/gorm_repository.go | lang: go | tokens: 1239 | size: 4959
 # functions: NewGormRepository
 BEGIN_FILE:internal/adapters/repository/calendar/gorm_repository.go
@@ -8139,6 +9106,250 @@ func (r *GormRepository) GetByID(ctx context.Context, id uint) (*domain.Message,
 	return &res, nil
 }
 END_FILE:internal/adapters/repository/messages/gorm_repository.go
+# path: internal/platform/database/models/user_model.go | lang: go | tokens: 1199 | size: 4798
+BEGIN_FILE:internal/platform/database/models/user_model.go
+package models
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type UserModel struct {
+	gorm.Model
+	FirstName      string    `gorm:"column:first_name"  json:"first_name" validate:"required,min=2,max=100"`
+	LastName       string    `gorm:"column:last_name" json:"last_name" validate:"required,min=2,max=100"`
+	Email          string    `gorm:"column:email;unique;Not Null" json:"email" validate:"required,email"`
+	PhoneNumber    string    `gorm:"column:phone_number;unique" json:"phone_number" validate:"required,len=10"`
+	IsVerified     bool      `gorm:"column:is_verified;default:false" json:"is_verified"`
+	HashedPassword string    `gorm:"column:hashed_password" `
+	ProfilePic     string    `gorm:"column:profile_id" json:"profile_id"`
+	City           string    `gorm:"column:city" json:"city"`
+	Country        string    `gorm:"column:country" json:"country"`
+	DateOfBirth    time.Time `gorm:"column:date_of_birth" json:"date_of_birth"`
+	LastLoginAt    time.Time `gorm:"column:last_login_at" json:"last_login_at"`
+}
+
+type Employee struct {
+	UserID         uint           `gorm:"column:user_id;primaryKey" json:"user_id"`
+	User           UserModel      `gorm:"foreignKey:UserID;references:ID"`
+	EmploymentID   int            `gorm:"column:employment_id" json:"employment_id"`
+	OrganisationID uint           `gorm:"column:organisation_id;references:ID" json:"organisation_id"`
+	Organisation   Organisation   `gorm:"foreignKey:OrganisationID;references:ID"`
+	Type           string         `gorm:"column:type" json:"type"`
+	Salary         string         `gorm:"column:salary" json:"salary"`
+	Email          string         `gorm:"column:email" json:"email"`
+	LastLoginAt    time.Time      `gorm:"column:last_login_at" json:"last_login_at"`
+	OnboardingCompleted bool      `gorm:"column:onboarding_completed;default:false" json:"onboarding_completed"`
+	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at"`
+}
+
+type Manager struct {
+	UserID         uint           `gorm:"column:user_id;primaryKey" json:"user_id"`
+	User           UserModel      `gorm:"foreignKey:UserID;references:ID"`
+	EmploymentID   int            `gorm:"column:employment_id" json:"employment_id"`
+	OrganisationID uint           `gorm:"column:organisation_id" json:"organisation_id"`
+	Organisation   Organisation   `gorm:"foreignKey:OrganisationID;references:ID"`
+	Type           string         `gorm:"column:type" json:"type"`
+	Salary         string         `gorm:"column:salary" json:"salary"`
+	Email          string         `gorm:"column:email" json:"email"`
+	LastLoginAt    time.Time      `gorm:"column:last_login_at" json:"last_login_at"`
+	OnboardingCompleted bool      `gorm:"column:onboarding_completed;default:false" json:"onboarding_completed"`
+	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at"`
+}
+
+type Boss struct {
+	UserID         uint           `gorm:"column:user_id;primaryKey" json:"user_id"`
+	User           UserModel      `gorm:"foreignKey:UserID;references:ID"`
+	OrganisationID uint           `gorm:"column:organisation_id" json:"organisation_id"`
+	Organisation   Organisation   `gorm:"foreignKey:OrganisationID;references:ID"`
+	Email          string         `gorm:"column:email" json:"email"`
+	LastLoginAt    time.Time      `gorm:"column:last_login_at" json:"last_login_at"`
+	OnboardingCompleted bool      `gorm:"column:onboarding_completed;default:false" json:"onboarding_completed"`
+	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at"`
+}
+
+type EmployeeInvite struct {
+	gorm.Model
+	Token           string     `gorm:"column:token;uniqueIndex;not null" json:"token"`
+	Email           string     `gorm:"column:email;not null" json:"email"`
+	FirstName       string     `gorm:"column:first_name" json:"first_name"`
+	LastName        string     `gorm:"column:last_name" json:"last_name"`
+	PhoneNumber     string     `gorm:"column:phone_number" json:"phone_number"`
+	EmploymentID    int        `gorm:"column:employment_id" json:"employment_id"`
+	OrganisationID  uint       `gorm:"column:organisation_id;not null" json:"organisation_id"`
+	InvitedByUserID uint       `gorm:"column:invited_by_user_id;not null" json:"invited_by_user_id"`
+	Status          string     `gorm:"column:status;default:'pending'" json:"status"`
+	ExpiresAt       time.Time  `gorm:"column:expires_at" json:"expires_at"`
+	AcceptedAt      *time.Time `gorm:"column:accepted_at" json:"accepted_at"`
+}
+
+type EmailVerification struct {
+	gorm.Model
+	UserID    uint       `gorm:"column:user_id;uniqueIndex;not null" json:"user_id"`
+	Token     string     `gorm:"column:token;uniqueIndex;not null" json:"token"`
+	ExpiresAt time.Time  `gorm:"column:expires_at;not null" json:"expires_at"`
+	UsedAt    *time.Time `gorm:"column:used_at" json:"used_at"`
+}
+
+
+END_FILE:internal/platform/database/models/user_model.go
+# path: internal/platform/middlewares/auth_validator_middleware.go | lang: go | tokens: 1176 | size: 4707
+# functions: ValidateToken, setRoleAndOrgFromClaims, normaliseRole, RoleMiddleware
+BEGIN_FILE:internal/platform/middlewares/auth_validator_middleware.go
+package middlewares
+
+import (
+	"log"
+	"net/http"
+	"server/internal/platform/miscallenous"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+func ValidateToken() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// ── Parse Authorization header ────────────────────────────────────────
+		// Expected formats:
+		//   "<accessToken>"
+		//   "<accessToken> <employeeToken>"
+		//   "Bearer <accessToken>"
+		//   "Bearer <accessToken> <employeeToken>"
+		rawHeader := c.GetHeader("Authorization")
+		rawHeader = strings.TrimPrefix(rawHeader, "Bearer ")
+		rawHeader = strings.TrimSpace(rawHeader)
+
+		parts := strings.Fields(rawHeader) // splits on any whitespace, skips empties
+		if len(parts) == 0 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header missing"})
+			c.Abort()
+			return
+		}
+
+		accessToken := parts[0]
+		empToken := ""
+		if len(parts) >= 2 && parts[1] != "null" {
+			empToken = parts[1]
+		}
+
+		// ── Validate access token (required) ──────────────────────────────────
+		decodedToken, err := miscallenous.DecodeJWTToken(accessToken)
+		if err != nil || !decodedToken.Valid {
+			log.Default().Println("Error: Token: ", err)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			c.Abort()
+			return
+		}
+
+		// Set userID from access token sub claim
+		if claims, ok := decodedToken.Claims.(jwt.MapClaims); ok {
+			if sub, ok := claims["sub"].(float64); ok {
+				c.Set("userID", uint(sub))
+			}
+
+			// Access token may itself embed employee/manager/boss data
+			// (this happens when IsEmployeeOrManager generates the token)
+			setRoleAndOrgFromClaims(c, claims)
+		}
+
+		// ── Validate employee token (optional) ────────────────────────────────
+		// A failure here is non-fatal — the access token already authenticated
+		// the user. We simply won't have org/role context from the emp token.
+		if empToken != "" {
+			decodedEmpToken, err := miscallenous.DecodeJWTToken(empToken)
+			if err != nil || !decodedEmpToken.Valid {
+				// Log it but DO NOT abort — access token is still valid
+				log.Default().Println("Warning: employee token invalid, ignoring: ", err)
+			} else {
+				if claims, ok := decodedEmpToken.Claims.(jwt.MapClaims); ok {
+					// Employee token claims take precedence over access token claims
+					// for org/role since they are more specific
+					setRoleAndOrgFromClaims(c, claims)
+				}
+			}
+		}
+
+		c.Next()
+	}
+}
+
+// setRoleAndOrgFromClaims reads employee/manager/boss claims from a decoded
+// JWT payload and sets "organisationID" and "role" on the gin context.
+// All owner/boss variants are normalised to "boss" for consistent handler checks.
+func setRoleAndOrgFromClaims(c *gin.Context, claims jwt.MapClaims) {
+	if emp, ok := claims["employee"].(map[string]interface{}); ok {
+		if orgID, ok := emp["organisation_id"].(float64); ok && orgID != 0 {
+			c.Set("organisationID", uint(orgID))
+		}
+		role := "employee"
+		if t, ok := emp["type"].(string); ok {
+			role = normaliseRole(t)
+		}
+		c.Set("role", role)
+		return
+	}
+
+	if mgr, ok := claims["manager"].(map[string]interface{}); ok {
+		if orgID, ok := mgr["organisation_id"].(float64); ok && orgID != 0 {
+			c.Set("organisationID", uint(orgID))
+		}
+		c.Set("role", "manager")
+		return
+	}
+
+	if boss, ok := claims["boss"].(map[string]interface{}); ok {
+		if orgID, ok := boss["organisation_id"].(float64); ok && orgID != 0 {
+			c.Set("organisationID", uint(orgID))
+		}
+		c.Set("role", "boss")
+		return
+	}
+}
+
+// normaliseRole maps all owner/boss type strings to the single canonical
+// value "boss" that handlers and RoleMiddleware check against.
+func normaliseRole(t string) string {
+	switch t {
+	case "owner", "boss":
+		return "boss"
+	case "manager":
+		return "manager"
+	default:
+		return "employee"
+	}
+}
+
+func RoleMiddleware(roles []string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userRoleVal, exists := c.Get("role")
+		if !exists {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: No role found"})
+			c.Abort()
+			return
+		}
+
+		userRole, ok := userRoleVal.(string)
+		if !ok {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Invalid role type"})
+			c.Abort()
+			return
+		}
+
+		for _, r := range roles {
+			if r == userRole {
+				c.Next()
+				return
+			}
+		}
+
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
+		c.Abort()
+	}
+}
+END_FILE:internal/platform/middlewares/auth_validator_middleware.go
 # path: internal/domain/resources/entity.go | lang: go | tokens: 1174 | size: 4697
 BEGIN_FILE:internal/domain/resources/entity.go
 package resources
@@ -8917,6 +10128,161 @@ type PeopleListContact struct {
 	Contact   PeopleContact `gorm:"foreignKey:ContactID;constraint:OnDelete:CASCADE;"`
 }
 END_FILE:internal/platform/database/models/people_models.go
+# path: internal/adapters/repository/invites/gorm_repository.go | lang: go | tokens: 1063 | size: 4254
+# functions: NewGormRepository, toModel, toDomain
+BEGIN_FILE:internal/adapters/repository/invites/gorm_repository.go
+package invites
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"gorm.io/gorm"
+
+	authDomain "server/internal/domain/auth"
+	employeesDomain "server/internal/domain/employees"
+	domain "server/internal/domain/invites"
+	"server/internal/platform/database/models"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, invite *domain.EmployeeInvite) error {
+	m := toModel(invite)
+	if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
+		return err
+	}
+	invite.ID = m.ID
+	invite.CreatedAt = m.CreatedAt
+	return nil
+}
+
+func (r *gormRepository) GetByToken(ctx context.Context, token string) (*domain.EmployeeInvite, error) {
+	var m models.EmployeeInvite
+	if err := r.db.WithContext(ctx).Where("token = ?", token).First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("invite not found")
+		}
+		return nil, err
+	}
+	return toDomain(&m), nil
+}
+
+func (r *gormRepository) GetByEmail(ctx context.Context, email string, orgID uint) (*domain.EmployeeInvite, error) {
+	var m models.EmployeeInvite
+	if err := r.db.WithContext(ctx).Where("email = ? AND organisation_id = ? AND status = ?", email, orgID, "pending").First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("invite not found")
+		}
+		return nil, err
+	}
+	return toDomain(&m), nil
+}
+
+func (r *gormRepository) MarkAccepted(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Model(&models.EmployeeInvite{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"status":      "accepted",
+			"accepted_at": time.Now(),
+		}).Error
+}
+
+func (r *gormRepository) GetByOrg(ctx context.Context, orgID uint) ([]domain.EmployeeInvite, error) {
+	var ms []models.EmployeeInvite
+	if err := r.db.WithContext(ctx).Where("organisation_id = ?", orgID).Order("created_at DESC").Find(&ms).Error; err != nil {
+		return nil, err
+	}
+	res := make([]domain.EmployeeInvite, len(ms))
+	for i, m := range ms {
+		res[i] = *toDomain(&m)
+	}
+	return res, nil
+}
+
+func (r *gormRepository) AcceptInvite(ctx context.Context, inviteID uint, u *authDomain.User, emp *employeesDomain.Employee) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		userModel := &models.UserModel{
+			FirstName:      u.FirstName,
+			LastName:       u.LastName,
+			Email:          u.Email,
+			PhoneNumber:    u.PhoneNumber,
+			IsVerified:     u.IsVerified,
+			HashedPassword: u.HashedPassword,
+		}
+		userModel.ID = u.ID
+		if err := tx.Save(userModel).Error; err != nil {
+			return err
+		}
+		u.ID = userModel.ID
+		emp.UserID = userModel.ID
+
+		employeeModel := &models.Employee{
+			UserID:         emp.UserID,
+			EmploymentID:   emp.EmploymentID,
+			OrganisationID: emp.OrganisationID,
+			Email:          emp.Email,
+		}
+		if err := tx.Create(employeeModel).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&models.EmployeeInvite{}).
+			Where("id = ?", inviteID).
+			Updates(map[string]interface{}{
+				"status":      "accepted",
+				"accepted_at": time.Now(),
+			}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+func toModel(invite *domain.EmployeeInvite) *models.EmployeeInvite {
+	m := &models.EmployeeInvite{
+		Token:           invite.Token,
+		Email:           invite.Email,
+		FirstName:       invite.FirstName,
+		LastName:        invite.LastName,
+		PhoneNumber:     invite.PhoneNumber,
+		EmploymentID:    invite.EmploymentID,
+		OrganisationID:  invite.OrganisationID,
+		InvitedByUserID: invite.InvitedByUserID,
+		Status:          invite.Status,
+		ExpiresAt:       invite.ExpiresAt,
+		AcceptedAt:      invite.AcceptedAt,
+	}
+	m.ID = invite.ID
+	return m
+}
+
+func toDomain(m *models.EmployeeInvite) *domain.EmployeeInvite {
+	return &domain.EmployeeInvite{
+		ID:              m.ID,
+		Token:           m.Token,
+		Email:           m.Email,
+		FirstName:       m.FirstName,
+		LastName:        m.LastName,
+		PhoneNumber:     m.PhoneNumber,
+		EmploymentID:    m.EmploymentID,
+		OrganisationID:  m.OrganisationID,
+		InvitedByUserID: m.InvitedByUserID,
+		Status:          m.Status,
+		ExpiresAt:       m.ExpiresAt,
+		CreatedAt:       m.CreatedAt,
+		AcceptedAt:      m.AcceptedAt,
+	}
+}
+END_FILE:internal/adapters/repository/invites/gorm_repository.go
 # path: internal/adapters/repository/leave/gorm_repository.go | lang: go | tokens: 1049 | size: 4199
 # functions: NewGormRepository, toModel, toDomain
 BEGIN_FILE:internal/adapters/repository/leave/gorm_repository.go
@@ -9233,176 +10599,6 @@ func (h *Handler) InitiateCall(c *gin.Context) {
 	})
 }
 END_FILE:internal/adapters/http/callstate/handler.go
-# path: internal/usecase/auth/usecase.go | lang: go | tokens: 1001 | size: 4004
-# functions: NewService
-BEGIN_FILE:internal/usecase/auth/usecase.go
-package auth
-
-import (
-	"context"
-	"errors"
-	"log"
-	domain "server/internal/domain/auth"
-	empDomain "server/internal/domain/employees"
-	"server/internal/platform/database/models"
-	"server/internal/platform/miscallenous"
-	"time"
-
-	"gorm.io/gorm"
-)
-
-var (
-	ErrUserAlreadyExists  = errors.New("user already exists")
-	ErrInvalidCredentials = errors.New("invalid email or password")
-	ErrUserNotFound       = errors.New("user not found")
-	ErrNotAnEmployee      = errors.New("user is not an employee")
-)
-
-type service struct {
-	repo    domain.Repository
-	empRepo empDomain.Repository
-}
-
-func NewService(repo domain.Repository, empRepo empDomain.Repository) domain.UseCase {
-	return &service{
-		repo:    repo,
-		empRepo: empRepo,
-	}
-}
-
-func (s *service) SignUp(ctx context.Context, user *domain.User, password string) (string, error) {
-
-	hashedPassword, err := miscallenous.HashPassword(password)
-	if err != nil {
-		return "", err
-	}
-	user.HashedPassword = hashedPassword
-	user.LastLoginAt = time.Now()
-	user_d, err := s.repo.GetByEmail(ctx, user.Email)
-	if user_d != nil {
-		if err != nil && err != gorm.ErrRecordNotFound {
-			return "", err
-		}
-		if user_d.HashedPassword != "" {
-			return "", gorm.ErrRegistered
-		}
-		if user_d.HashedPassword == "" {
-			user.ID = user_d.ID
-			if err := s.repo.Update(ctx, user); err != nil {
-				return "", err
-			}
-		} else {
-			if err := s.repo.Create(ctx, user); err != nil {
-				return "", err
-			}
-		}
-	}
-	if err := s.repo.Create(ctx, user); err != nil {
-		return "", err
-	}
-	// Map domain user to model for JWT generation (as current JWT helper expects model)
-	// Ideally, the JWT helper should take a domain entity or a generic interface.
-	userModel := models.UserModel{
-		FirstName: user.FirstName,
-		LastName:  user.LastName,
-		Email:     user.Email,
-	}
-	userModel.ID = user.ID
-	log.Default().Println("Generating JWT token for user", user.ID)
-	token, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
-	if err != nil {
-		return "", err
-	}
-
-	return token, nil
-}
-
-func (s *service) SignIn(ctx context.Context, email, password string) (string, error) {
-	user, err := s.repo.GetByEmail(ctx, email)
-	if err != nil {
-		return "", ErrInvalidCredentials
-	}
-
-	if !miscallenous.VerifyPassword(user.HashedPassword, password) {
-		return "", ErrInvalidCredentials
-	}
-
-	userModel := models.UserModel{
-		FirstName: user.FirstName,
-		LastName:  user.LastName,
-		Email:     user.Email,
-	}
-	userModel.ID = user.ID
-
-	token, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
-	if err != nil {
-		return "", err
-	}
-
-	return token, nil
-}
-
-func (s *service) CompleteSignIn(ctx context.Context, email, phone, password, city, country, profilePic string) (string, error) {
-	user, err := s.repo.GetByEmail(ctx, email)
-	if err != nil {
-		user, err = s.repo.GetByPhoneNumber(ctx, phone)
-		if err != nil {
-			return "", ErrUserNotFound
-		}
-	}
-
-	hashedPassword, err := miscallenous.HashPassword(password)
-	if err != nil {
-		return "", err
-	}
-
-	user.HashedPassword = hashedPassword
-	user.City = city
-	user.Country = country
-	user.ProfilePic = profilePic
-	user.IsVerified = true
-	user.LastLoginAt = time.Now()
-
-	if err := s.repo.Update(ctx, user); err != nil {
-		return "", err
-	}
-
-	userModel := models.UserModel{
-		FirstName: user.FirstName,
-		LastName:  user.LastName,
-		Email:     user.Email,
-	}
-	userModel.ID = user.ID
-
-	token, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
-	if err != nil {
-		return "", err
-	}
-
-	return token, nil
-}
-
-func (s *service) ValidateEmployee(ctx context.Context, userID uint) (string, error) {
-	employee, err := s.empRepo.GetByUserID(ctx, userID)
-	if err != nil {
-		return "", ErrNotAnEmployee
-	}
-
-	// Map to model for JWT generation
-	empModel := models.Employee{
-		UserID:         employee.UserID,
-		OrganisationID: employee.OrganisationID,
-		Type:           employee.Type,
-	}
-
-	token, err := miscallenous.GenerateJWTToken(empModel, "employee", employee.UserID)
-	if err != nil {
-		return "", err
-	}
-
-	return token, nil
-}
-END_FILE:internal/usecase/auth/usecase.go
 # path: internal/domain/research/entity.go | lang: go | tokens: 997 | size: 3990
 # imports: time
 BEGIN_FILE:internal/domain/research/entity.go
@@ -9507,144 +10703,6 @@ type ResearchActivity struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 END_FILE:internal/domain/research/entity.go
-# path: internal/adapters/http/auth/handler.go | lang: go | tokens: 989 | size: 3956
-# functions: NewHandler
-BEGIN_FILE:internal/adapters/http/auth/handler.go
-package auth
-
-import (
-	"errors"
-	"net/http"
-	domain "server/internal/domain/auth"
-	usecase "server/internal/usecase/auth"
-
-	"github.com/gin-gonic/gin"
-)
-
-type Handler struct {
-	uc domain.UseCase
-}
-
-func NewHandler(uc domain.UseCase) *Handler {
-	return &Handler{uc: uc}
-}
-
-func (h *Handler) SignUp(c *gin.Context) {
-	var req struct {
-		FirstName   string `form:"first_name" binding:"required"`
-		LastName    string `form:"last_name" binding:"required"`
-		Email       string `form:"email" binding:"required,email"`
-		Password    string `form:"password" binding:"required"`
-		City        string `form:"city"`
-		Country     string `form:"country"`
-		PhoneNumber string `form:"phone_number" binding:"required"`
-		ProfilePic  string `form:"profile_pic"`
-	}
-
-	if err := c.ShouldBind(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	user := &domain.User{
-		FirstName:   req.FirstName,
-		LastName:    req.LastName,
-		Email:       req.Email,
-		City:        req.City,
-		Country:     req.Country,
-		PhoneNumber: req.PhoneNumber,
-		ProfilePic:  req.ProfilePic,
-	}
-
-	token, err := h.uc.SignUp(c.Request.Context(), user, req.Password)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign up", "message": err.Error()})
-		return
-	}
-
-	c.Header("Authorization", token)
-	c.JSON(http.StatusOK, gin.H{"message": "User created successfully"})
-}
-
-func (h *Handler) SignIn(c *gin.Context) {
-	email := c.Request.FormValue("email")
-	password := c.Request.FormValue("password")
-
-	if email == "" || password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Email and password are required"})
-		return
-	}
-
-	token, err := h.uc.SignIn(c.Request.Context(), email, password)
-	if err != nil {
-		if errors.Is(err, usecase.ErrInvalidCredentials) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign in"})
-		return
-	}
-
-	c.Header("Authorization", token)
-	c.JSON(http.StatusOK, gin.H{"message": "Sign in successful"})
-}
-
-func (h *Handler) CompleteSignIn(c *gin.Context) {
-	var req struct {
-		Email       string `json:"email" binding:"required,email"`
-		PhoneNumber string `json:"phone_number" binding:"required"`
-		Password    string `json:"password" binding:"required"`
-		City        string `json:"city" binding:"required"`
-		Country     string `json:"country" binding:"required"`
-		ProfilePic  string `json:"profile_pic" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	token, err := h.uc.CompleteSignIn(c.Request.Context(), req.Email, req.PhoneNumber, req.Password, req.City, req.Country, req.ProfilePic)
-	if err != nil {
-		if errors.Is(err, usecase.ErrUserNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete sign in"})
-		return
-	}
-
-	c.Header("Authorization", token)
-	c.JSON(http.StatusOK, gin.H{"message": "User updated successfully"})
-}
-
-func (h *Handler) ValidateEmployee(c *gin.Context) {
-	// Assuming userID is in the token and middleware already validated it
-	// In the original code, it decoded the token to get userID.
-	// We can use a value set in the context by the ValidateToken middleware.
-	
-	userIDVal, exists := c.Get("userID")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
-		return
-	}
-
-	userID := userIDVal.(uint)
-
-	token, err := h.uc.ValidateEmployee(c.Request.Context(), userID)
-	if err != nil {
-		if errors.Is(err, usecase.ErrNotAnEmployee) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate employee"})
-		return
-	}
-
-	c.Header("Authorization", token)
-	c.JSON(http.StatusOK, gin.H{"message": "Employee validated successfully"})
-}
-END_FILE:internal/adapters/http/auth/handler.go
 # path: internal/adapters/repository/teams/gorm_repository.go | lang: go | tokens: 982 | size: 3930
 # functions: NewGormRepository, toModel, toDomain, toDomainList
 BEGIN_FILE:internal/adapters/repository/teams/gorm_repository.go
@@ -10211,70 +11269,6 @@ func (c *Client) WritePump() {
 	}
 }
 END_FILE:internal/platform/websocket/client.go
-# path: internal/platform/database/models/user_model.go | lang: go | tokens: 876 | size: 3506
-BEGIN_FILE:internal/platform/database/models/user_model.go
-package models
-
-import (
-	"time"
-
-	"gorm.io/gorm"
-)
-
-type UserModel struct {
-	gorm.Model
-	FirstName      string    `gorm:"column:first_name"  json:"first_name" validate:"required,min=2,max=100"`
-	LastName       string    `gorm:"column:last_name" json:"last_name" validate:"required,min=2,max=100"`
-	Email          string    `gorm:"column:email;unique;Not Null" json:"email" validate:"required,email"`
-	PhoneNumber    string    `gorm:"column:phone_number;unique" json:"phone_number" validate:"required,len=10"`
-	IsVerified     bool      `gorm:"column:is_verified;default:false" json:"is_verified"`
-	HashedPassword string    `gorm:"column:hashed_password" `
-	ProfilePic     string    `gorm:"column:profile_id" json:"profile_id"`
-	City           string    `gorm:"column:city" json:"city"`
-	Country        string    `gorm:"column:country" json:"country"`
-	DateOfBirth    time.Time `gorm:"column:date_of_birth" json:"date_of_birth"`
-	LastLoginAt    time.Time `gorm:"column:last_login_at" json:"last_login_at"`
-}
-
-type Employee struct {
-	UserID         uint           `gorm:"column:user_id;primaryKey" json:"user_id"`
-	User           UserModel      `gorm:"foreignKey:UserID;references:ID"`
-	EmploymentID   int            `gorm:"column:employment_id" json:"employment_id"`
-	OrganisationID uint           `gorm:"column:organisation_id;references:ID" json:"organisation_id"`
-	Organisation   Organisation   `gorm:"foreignKey:OrganisationID;references:ID"`
-	Type           string         `gorm:"column:type" json:"type"`
-	Salary         string         `gorm:"column:salary" json:"salary"`
-	Email          string         `gorm:"column:email" json:"email"`
-	LastLoginAt    time.Time      `gorm:"column:last_login_at" json:"last_login_at"`
-	OnboardingCompleted bool      `gorm:"column:onboarding_completed;default:false" json:"onboarding_completed"`
-	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at"`
-}
-
-type Manager struct {
-	UserID         uint           `gorm:"column:user_id;primaryKey" json:"user_id"`
-	User           UserModel      `gorm:"foreignKey:UserID;references:ID"`
-	EmploymentID   int            `gorm:"column:employment_id" json:"employment_id"`
-	OrganisationID uint           `gorm:"column:organisation_id" json:"organisation_id"`
-	Organisation   Organisation   `gorm:"foreignKey:OrganisationID;references:ID"`
-	Type           string         `gorm:"column:type" json:"type"`
-	Salary         string         `gorm:"column:salary" json:"salary"`
-	Email          string         `gorm:"column:email" json:"email"`
-	LastLoginAt    time.Time      `gorm:"column:last_login_at" json:"last_login_at"`
-	OnboardingCompleted bool      `gorm:"column:onboarding_completed;default:false" json:"onboarding_completed"`
-	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at"`
-}
-
-type Boss struct {
-	UserID         uint           `gorm:"column:user_id;primaryKey" json:"user_id"`
-	User           UserModel      `gorm:"foreignKey:UserID;references:ID"`
-	OrganisationID uint           `gorm:"column:organisation_id" json:"organisation_id"`
-	Organisation   Organisation   `gorm:"foreignKey:OrganisationID;references:ID"`
-	Email          string         `gorm:"column:email" json:"email"`
-	LastLoginAt    time.Time      `gorm:"column:last_login_at" json:"last_login_at"`
-	OnboardingCompleted bool      `gorm:"column:onboarding_completed;default:false" json:"onboarding_completed"`
-	DeletedAt      gorm.DeletedAt `gorm:"index" json:"deleted_at"`
-}
-END_FILE:internal/platform/database/models/user_model.go
 # path: internal/adapters/repository/attendance/gorm_repository.go | lang: go | tokens: 843 | size: 3372
 # functions: NewGormRepository, toModel, toDomain, toDomainList
 BEGIN_FILE:internal/adapters/repository/attendance/gorm_repository.go
@@ -10398,6 +11392,137 @@ func toDomainList(modelsList []models.Attendance) []domain.Attendance {
 	return result
 }
 END_FILE:internal/adapters/repository/attendance/gorm_repository.go
+# path: internal/adapters/http/invites/handler.go | lang: go | tokens: 829 | size: 3317
+# functions: NewHandler, getUserAuthInfo
+BEGIN_FILE:internal/adapters/http/invites/handler.go
+package invites
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+
+	domain "server/internal/domain/invites"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func getUserAuthInfo(c *gin.Context) (uint, uint, string, bool) {
+	userIDVal, existsUser := c.Get("userID")
+	orgIDVal, existsOrg := c.Get("organisationID")
+	roleVal, existsRole := c.Get("role")
+	if !existsUser || !existsOrg || !existsRole {
+		return 0, 0, "", false
+	}
+	userID, okUser := userIDVal.(uint)
+	orgID, okOrg := orgIDVal.(uint)
+	role, okRole := roleVal.(string)
+	if !okUser || !okOrg || !okRole {
+		return 0, 0, "", false
+	}
+	return userID, orgID, role, true
+}
+
+func (h *Handler) InviteEmployee(c *gin.Context) {
+	userID, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	if role != "boss" && role != "manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
+		return
+	}
+
+	var req struct {
+		Email        string `json:"email" binding:"required,email"`
+		FirstName    string `json:"first_name" binding:"required"`
+		LastName     string `json:"last_name" binding:"required"`
+		PhoneNumber  string `json:"phone_number"`
+		EmploymentID int    `json:"employment_id" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	invite := &domain.EmployeeInvite{
+		Email:           req.Email,
+		FirstName:       req.FirstName,
+		LastName:        req.LastName,
+		PhoneNumber:     req.PhoneNumber,
+		EmploymentID:    req.EmploymentID,
+		OrganisationID:  orgID,
+		InvitedByUserID: userID,
+	}
+
+	if err := h.uc.InviteEmployee(c.Request.Context(), invite); err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Invitation sent successfully"})
+}
+
+func (h *Handler) AcceptInvite(c *gin.Context) {
+	var req struct {
+		Token    string `json:"token" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	pair, err := h.uc.AcceptInvite(c.Request.Context(), req.Token, req.Password)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Invitation accepted successfully",
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
+}
+
+func (h *Handler) GetInvites(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	if role != "boss" && role != "manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
+		return
+	}
+
+	invites, err := h.uc.GetInvitesByOrg(c.Request.Context(), orgID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"invites": invites})
+}
+END_FILE:internal/adapters/http/invites/handler.go
 # path: internal/usecase/attendance/usecase.go | lang: go | tokens: 813 | size: 3252
 # functions: NewService
 BEGIN_FILE:internal/usecase/attendance/usecase.go
@@ -10761,119 +11886,6 @@ func (h *Handler) DeleteTeam(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Team deleted successfully"})
 }
 END_FILE:internal/adapters/http/teams/handler.go
-# path: internal/platform/middlewares/auth_validator_middleware.go | lang: go | tokens: 758 | size: 3032
-# functions: ValidateToken, RoleMiddleware
-BEGIN_FILE:internal/platform/middlewares/auth_validator_middleware.go
-package middlewares
-
-import (
-	"log"
-	"net/http"
-	"server/internal/platform/miscallenous"
-	"strings"
-
-	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
-)
-
-// ValidateToken is a middleware function that checks for a valid JWT token in the request header.
-// It decodes the token and verifies its validity before allowing the request to proceed.
-// If the token is invalid or missing, it responds with an "Unauthorized" error.
-func ValidateToken() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Extract the token from the Authorization header
-		token := c.GetHeader("Authorization")
-		if strings.Contains(token, "Bearer ") {
-			token = strings.TrimPrefix(token, "Bearer ")
-		}
-
-		// Attempt to decode and validate the token
-		decodedToken, err := miscallenous.DecodeJWTToken(token)
-		// If there's an error in decoding, respond with Unauthorized
-		if err != nil {
-			log.Default().Println(err)
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			c.Abort()
-			return
-		}
-
-		// If the token is valid, allow the request to proceed
-		if decodedToken.Valid {
-			log.Default().Println("token is valid")
-			if claims, ok := decodedToken.Claims.(jwt.MapClaims); ok {
-				if sub, ok := claims["sub"].(float64); ok {
-					c.Set("userID", uint(sub))
-				}
-				if emp, ok := claims["employee"].(map[string]interface{}); ok {
-					if orgID, ok := emp["organisation_id"].(float64); ok {
-						c.Set("organisationID", uint(orgID))
-					}
-					role := "employee"
-					if t, ok := emp["type"].(string); ok {
-						switch t {
-						case "owner", "boss":
-							role = "boss"
-						case "manager":
-							role = "manager"
-						}
-					}
-					c.Set("role", role)
-				} else if mgr, ok := claims["manager"].(map[string]interface{}); ok {
-					if orgID, ok := mgr["organisation_id"].(float64); ok {
-						c.Set("organisationID", uint(orgID))
-					}
-					c.Set("role", "manager")
-				} else if boss, ok := claims["boss"].(map[string]interface{}); ok {
-					if orgID, ok := boss["organisation_id"].(float64); ok {
-						c.Set("organisationID", uint(orgID))
-					}
-					c.Set("role", "boss")
-				}
-			}
-			c.Next()
-			return
-		}
-
-		// If we reach here, the token was invalid
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		c.Abort()
-	}
-}
-
-func RoleMiddleware(roles []string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		userRoleStr, exists := c.Get("role")
-		if !exists {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: No role found"})
-			c.Abort()
-			return
-		}
-
-		userRole, ok := userRoleStr.(string)
-		if !ok {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Invalid role type"})
-			c.Abort()
-			return
-		}
-
-		allowed := false
-		for _, r := range roles {
-			if r == userRole {
-				allowed = true
-				break
-			}
-		}
-
-		if !allowed {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
-			c.Abort()
-			return
-		}
-
-		c.Next()
-	}
-}
-END_FILE:internal/platform/middlewares/auth_validator_middleware.go
 # path: internal/platform/websocket/hub.go | lang: go | tokens: 757 | size: 3029
 # functions: NewHub
 BEGIN_FILE:internal/platform/websocket/hub.go
@@ -11314,6 +12326,114 @@ type CallState struct {
 	Offer            *string    `gorm:"type:text" json:"offer"`
 }
 END_FILE:internal/platform/database/models/chat_models.go
+# path: internal/platform/database/init.go | lang: go | tokens: 671 | size: 2684
+# functions: Init, initDB, PerformMigrations
+BEGIN_FILE:internal/platform/database/init.go
+package database
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"server/internal/platform/database/models"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+var DB *gorm.DB
+
+func Init() {
+	DB = initDB()
+}
+
+func initDB() *gorm.DB {
+	host := os.Getenv("DB_HOST")
+	user := os.Getenv("DB_USER")
+	password := os.Getenv("DB_PASSWORD")
+	dbname := os.Getenv("DB_NAME")
+	port := os.Getenv("DB_PORT")
+
+	if host == "" || user == "" || password == "" || dbname == "" || port == "" {
+		log.Fatalf("Database configuration missing. Please check environment variables.")
+	}
+
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable", host, user, password, dbname, port)
+
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		panic("failed to connect database")
+	}
+	return db
+}
+
+func PerformMigrations() error {
+	err := DB.AutoMigrate(
+		&models.Organisation{},
+		&models.UserModel{},
+		&models.Task{},
+		&models.File{},
+		&models.Employee{},
+		&models.Manager{},
+		&models.Boss{},
+		&models.Attendance{},
+		&models.Project{},
+		&models.Team{},
+		&models.TeamMember{},
+		&models.Notification{},
+		&models.Chat{},
+		&models.ChatMessage{},
+		&models.ChatParticipant{},
+		&models.CallState{},
+		&models.TaskComment{},
+		&models.TaskAttachment{},
+		&models.OnboardingProgress{},
+		&models.Leave{},
+		&models.Milestone{},
+		&models.LeavePolicy{},
+		&models.AttendancePolicy{},
+		&models.RolePermissions{},
+		&models.TaskType{},
+		&models.TaskActivity{},
+		&models.WorkSchedule{},
+		&models.AuditLog{},
+		&models.Invite{},
+		&models.EmployeeInvite{},
+		&models.EmailVerification{},
+		&models.ResourceCollection{},
+		&models.ResourceRecord{},
+		&models.ResourceRecordHistory{},
+		&models.ResourceRecordAttachment{},
+		&models.ResearchEntry{},
+		&models.ResearchFolder{},
+		&models.ResearchDocument{},
+		&models.ResearchDocumentVersion{},
+		&models.ResearchFile{},
+		&models.ResearchReference{},
+		&models.ResearchCollaborator{},
+		&models.ResearchActivity{},
+		&models.PeopleContact{},
+		&models.PeopleInteraction{},
+		&models.PeoplePipelineStage{},
+		&models.PeopleList{},
+		&models.PeopleListContact{},
+		&models.RefreshToken{},
+	)
+	if err != nil {
+		return err
+	}
+
+	// Create GIN index and search helper indexes for Resource Collection and Records
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_data ON resource_records USING GIN (data)`)
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_collection_org ON resource_records (collection_id, organisation_id)`)
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_collections_org ON resource_collections (organisation_id)`)
+
+	return nil
+}
+END_FILE:internal/platform/database/init.go
 # path: internal/usecase/projects/usecase.go | lang: go | tokens: 666 | size: 2667
 # functions: NewService
 BEGIN_FILE:internal/usecase/projects/usecase.go
@@ -11408,111 +12528,6 @@ func (s *service) GetMilestoneByID(ctx context.Context, id uint) (*domain.Milest
 }
 
 END_FILE:internal/usecase/projects/usecase.go
-# path: internal/platform/database/init.go | lang: go | tokens: 649 | size: 2599
-# functions: Init, initDB, PerformMigrations
-BEGIN_FILE:internal/platform/database/init.go
-package database
-
-import (
-	"fmt"
-	"log"
-	"os"
-	"server/internal/platform/database/models"
-
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-)
-
-var DB *gorm.DB
-
-func Init() {
-	DB = initDB()
-}
-
-func initDB() *gorm.DB {
-	host := os.Getenv("DB_HOST")
-	user := os.Getenv("DB_USER")
-	password := os.Getenv("DB_PASSWORD")
-	dbname := os.Getenv("DB_NAME")
-	port := os.Getenv("DB_PORT")
-
-	if host == "" || user == "" || password == "" || dbname == "" || port == "" {
-		log.Fatalf("Database configuration missing. Please check environment variables.")
-	}
-
-	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable", host, user, password, dbname, port)
-
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
-	})
-	if err != nil {
-		panic("failed to connect database")
-	}
-	return db
-}
-
-func PerformMigrations() error {
-	err := DB.AutoMigrate(
-		&models.Organisation{},
-		&models.UserModel{},
-		&models.Task{},
-		&models.File{},
-		&models.Employee{},
-		&models.Manager{},
-		&models.Boss{},
-		&models.Attendance{},
-		&models.Project{},
-		&models.Team{},
-		&models.TeamMember{},
-		&models.Notification{},
-		&models.Chat{},
-		&models.ChatMessage{},
-		&models.ChatParticipant{},
-		&models.CallState{},
-		&models.TaskComment{},
-		&models.TaskAttachment{},
-		&models.OnboardingProgress{},
-		&models.Leave{},
-		&models.Milestone{},
-		&models.LeavePolicy{},
-		&models.AttendancePolicy{},
-		&models.RolePermissions{},
-		&models.TaskType{},
-		&models.TaskActivity{},
-		&models.WorkSchedule{},
-		&models.AuditLog{},
-		&models.Invite{},
-		&models.ResourceCollection{},
-		&models.ResourceRecord{},
-		&models.ResourceRecordHistory{},
-		&models.ResourceRecordAttachment{},
-		&models.ResearchEntry{},
-		&models.ResearchFolder{},
-		&models.ResearchDocument{},
-		&models.ResearchDocumentVersion{},
-		&models.ResearchFile{},
-		&models.ResearchReference{},
-		&models.ResearchCollaborator{},
-		&models.ResearchActivity{},
-		&models.PeopleContact{},
-		&models.PeopleInteraction{},
-		&models.PeoplePipelineStage{},
-		&models.PeopleList{},
-		&models.PeopleListContact{},
-	)
-	if err != nil {
-		return err
-	}
-
-	// Create GIN index and search helper indexes for Resource Collection and Records
-	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_data ON resource_records USING GIN (data)`)
-	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_records_collection_org ON resource_records (collection_id, organisation_id)`)
-	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_resource_collections_org ON resource_collections (organisation_id)`)
-
-	return nil
-}
-END_FILE:internal/platform/database/init.go
 # path: internal/adapters/http/organisation/handler.go | lang: go | tokens: 649 | size: 2596
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/organisation/handler.go
@@ -12267,100 +13282,6 @@ type UseCase interface {
 	GetOrgEmployeeMonitor(ctx context.Context, orgID uint) ([]EmployeeMonitorResponse, error)
 }
 END_FILE:internal/domain/analytics/entity.go
-# path: internal/adapters/repository/auth/gorm_repository.go | lang: go | tokens: 585 | size: 2342
-# functions: NewGormRepository, toModel, toDomain
-BEGIN_FILE:internal/adapters/repository/auth/gorm_repository.go
-package auth
-
-import (
-	"context"
-	domain "server/internal/domain/auth"
-	"server/internal/platform/database/models"
-
-	"gorm.io/gorm"
-)
-
-type gormRepository struct {
-	db *gorm.DB
-}
-
-func NewGormRepository(db *gorm.DB) domain.Repository {
-	return &gormRepository{db: db}
-}
-
-func (r *gormRepository) Create(ctx context.Context, user *domain.User) error {
-	model := toModel(user)
-	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
-		return err
-	}
-	user.ID = model.ID
-	return nil
-}
-
-func (r *gormRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
-	var model models.UserModel
-	if err := r.db.WithContext(ctx).Where("email = ?", email).First(&model).Error; err != nil {
-		return nil, err
-	}
-	return toDomain(&model), nil
-}
-
-func (r *gormRepository) GetByPhoneNumber(ctx context.Context, phone string) (*domain.User, error) {
-	var model models.UserModel
-	if err := r.db.WithContext(ctx).Where("phone_number = ?", phone).First(&model).Error; err != nil {
-		return nil, err
-	}
-	return toDomain(&model), nil
-}
-
-func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.User, error) {
-	var model models.UserModel
-	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
-		return nil, err
-	}
-	return toDomain(&model), nil
-}
-
-func (r *gormRepository) Update(ctx context.Context, user *domain.User) error {
-	model := toModel(user)
-	return r.db.WithContext(ctx).Save(model).Error
-}
-
-func toModel(u *domain.User) *models.UserModel {
-	model := &models.UserModel{
-		FirstName:      u.FirstName,
-		LastName:       u.LastName,
-		Email:          u.Email,
-		PhoneNumber:    u.PhoneNumber,
-		IsVerified:     u.IsVerified,
-		HashedPassword: u.HashedPassword,
-		ProfilePic:     u.ProfilePic,
-		City:           u.City,
-		Country:        u.Country,
-		DateOfBirth:    u.DateOfBirth,
-		LastLoginAt:    u.LastLoginAt,
-	}
-	model.ID = u.ID
-	return model
-}
-
-func toDomain(m *models.UserModel) *domain.User {
-	return &domain.User{
-		ID:             m.ID,
-		FirstName:      m.FirstName,
-		LastName:       m.LastName,
-		Email:          m.Email,
-		PhoneNumber:    m.PhoneNumber,
-		IsVerified:     m.IsVerified,
-		HashedPassword: m.HashedPassword,
-		ProfilePic:     m.ProfilePic,
-		City:           m.City,
-		Country:        m.Country,
-		DateOfBirth:    m.DateOfBirth,
-		LastLoginAt:    m.LastLoginAt,
-	}
-}
-END_FILE:internal/adapters/repository/auth/gorm_repository.go
 # path: internal/adapters/http/task_comments/handler.go | lang: go | tokens: 581 | size: 2326
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/task_comments/handler.go
@@ -13472,6 +14393,74 @@ func (h *Handler) MarkAllRead(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "all notifications marked as read"})
 }
 END_FILE:internal/adapters/http/notifications/handler.go
+# path: internal/platform/miscallenous/misc_functions.go | lang: go | tokens: 429 | size: 1717
+# functions: GenerateJWTToken, DecodeJWTToken, HashPassword, VerifyPassword, GenerateRefreshToken, HashRefreshToken, RefreshTokenExpiresAt
+BEGIN_FILE:internal/platform/miscallenous/misc_functions.go
+package miscallenous
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"os"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// GenerateJWTToken creates a short-lived access token (15 minutes).
+func GenerateJWTToken(object any, tokenName string, ID uint) (string, error) {
+	if ID == 0 {
+		return "", errors.New("ID must be greater than 0")
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		tokenName: object,
+		"sub":     ID,
+		"exp":     time.Now().Add(15 * time.Minute).Unix(),
+	}).SignedString([]byte(os.Getenv("SECRET")))
+}
+
+func DecodeJWTToken(tokenString string) (*jwt.Token, error) {
+	keyFunc := func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return []byte(os.Getenv("SECRET")), nil
+	}
+	return jwt.Parse(tokenString, keyFunc)
+}
+
+func HashPassword(password string) (string, error) {
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hashedPassword), nil
+}
+
+func VerifyPassword(hashedPassword string, password string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)) == nil
+}
+
+func GenerateRefreshToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func HashRefreshToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+func RefreshTokenExpiresAt() int64 {
+	return time.Now().Add(30 * 24 * time.Hour).Unix()
+}
+END_FILE:internal/platform/miscallenous/misc_functions.go
 # path: internal/adapters/http/search/handler.go | lang: go | tokens: 419 | size: 1678
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/search/handler.go
@@ -14023,56 +15012,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/research/routes.go
-# path: internal/platform/miscallenous/misc_functions.go | lang: go | tokens: 342 | size: 1369
-# functions: GenerateJWTToken, DecodeJWTToken, HashPassword, VerifyPassword
-BEGIN_FILE:internal/platform/miscallenous/misc_functions.go
-package miscallenous
-
-import (
-	"errors"
-	"os"
-	"time"
-
-	"github.com/golang-jwt/jwt/v5"
-	"golang.org/x/crypto/bcrypt"
-)
-
-// generateJWTToken creates a new JWT token for the given user.
-func GenerateJWTToken(object any, tokenName string, ID uint) (string, error) {
-	if ID == 0 {
-		return "", errors.New("ID must be greater than 0")
-	}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		tokenName: object,
-		"sub":     ID,
-		"exp":     time.Now().Add(time.Hour * 24 * 30).Unix(), // Expiration time (30 days from now)
-	}).SignedString([]byte(os.Getenv("SECRET")))
-}
-
-func DecodeJWTToken(tokenString string) (*jwt.Token, error) {
-	keyFunc := func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return []byte(os.Getenv("SECRET")), nil
-	}
-
-	return jwt.Parse(tokenString, keyFunc)
-}
-
-// hashPassword hashes the given password using bcrypt.
-func HashPassword(password string) (string, error) {
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return "", err
-	}
-	return string(hashedPassword), nil
-}
-
-func VerifyPassword(hashedPassword string, password string) bool {
-	return bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)) == nil
-}
-END_FILE:internal/platform/miscallenous/misc_functions.go
 # path: internal/adapters/http/notifications/ws_handler.go | lang: go | tokens: 341 | size: 1364
 BEGIN_FILE:internal/adapters/http/notifications/ws_handler.go
 package notifications
@@ -14434,39 +15373,6 @@ type ResearchDocumentVersion struct {
 	CreatedBy      uint   `gorm:"not null" json:"created_by"`
 }
 END_FILE:internal/platform/database/models/research_document_model.go
-# path: internal/domain/chats/entity.go | lang: go | tokens: 286 | size: 1144
-# imports: time
-BEGIN_FILE:internal/domain/chats/entity.go
-package chats
-
-import "time"
-
-type Chat struct {
-	ID             uint              `json:"id"`
-	RoomID         string            `json:"room_id"`
-	OrganisationID uint              `json:"organisation_id"`
-	Name           string            `json:"name"`
-	IsGroup        bool              `json:"is_group"`
-	CreatedBy      uint              `json:"created_by"`
-	LastMessage    string            `json:"last_message"`
-	LastMessageAt  *time.Time        `json:"last_message_at"`
-	MessageCount   int               `json:"message_count"`
-	Participants   []ChatParticipant `json:"participants,omitempty"`
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
-}
-
-type ChatParticipant struct {
-	ChatID            uint       `json:"chat_id"`
-	UserID            uint       `json:"user_id"`
-	FirstName         string     `json:"first_name"`
-	LastName          string     `json:"last_name"`
-	AvatarURL         string     `json:"avatar_url"`
-	UnreadCount       int        `json:"unread_count"`
-	LastReadMessageID *uint      `json:"last_read_message_id"`
-	JoinedAt          time.Time  `json:"joined_at"`
-}
-END_FILE:internal/domain/chats/entity.go
 # path: internal/adapters/http/onboarding/handler.go | lang: go | tokens: 286 | size: 1145
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/onboarding/handler.go
@@ -14521,6 +15427,39 @@ func (h *Handler) UpdateOnboardingProgress(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "onboarding progress updated"})
 }
 END_FILE:internal/adapters/http/onboarding/handler.go
+# path: internal/domain/chats/entity.go | lang: go | tokens: 286 | size: 1144
+# imports: time
+BEGIN_FILE:internal/domain/chats/entity.go
+package chats
+
+import "time"
+
+type Chat struct {
+	ID             uint              `json:"id"`
+	RoomID         string            `json:"room_id"`
+	OrganisationID uint              `json:"organisation_id"`
+	Name           string            `json:"name"`
+	IsGroup        bool              `json:"is_group"`
+	CreatedBy      uint              `json:"created_by"`
+	LastMessage    string            `json:"last_message"`
+	LastMessageAt  *time.Time        `json:"last_message_at"`
+	MessageCount   int               `json:"message_count"`
+	Participants   []ChatParticipant `json:"participants,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+type ChatParticipant struct {
+	ChatID            uint       `json:"chat_id"`
+	UserID            uint       `json:"user_id"`
+	FirstName         string     `json:"first_name"`
+	LastName          string     `json:"last_name"`
+	AvatarURL         string     `json:"avatar_url"`
+	UnreadCount       int        `json:"unread_count"`
+	LastReadMessageID *uint      `json:"last_read_message_id"`
+	JoinedAt          time.Time  `json:"joined_at"`
+}
+END_FILE:internal/domain/chats/entity.go
 # path: internal/domain/messages/entity.go | lang: go | tokens: 282 | size: 1130
 # imports: time
 BEGIN_FILE:internal/domain/messages/entity.go
@@ -14556,6 +15495,53 @@ type CursorPage struct {
 	HasMore    bool      `json:"has_more"`
 }
 END_FILE:internal/domain/messages/entity.go
+# path: internal/platform/mailer/gmail_mailer.go | lang: go | tokens: 277 | size: 1111
+# functions: NewGmailMailer
+BEGIN_FILE:internal/platform/mailer/gmail_mailer.go
+package mailer
+
+import (
+	"net/smtp"
+	"os"
+	"strings"
+)
+
+type Mailer interface {
+	SendMail(to string, subject string, htmlBody string) error
+}
+
+type gmailMailer struct {
+	fromAddress string
+	appPassword string
+}
+
+func NewGmailMailer() Mailer {
+	fromAddress := os.Getenv("GMAIL_ADDRESS")
+	appPassword := os.Getenv("GMAIL_APP_PASSWORD")
+	if fromAddress == "" || appPassword == "" {
+		panic("mailer: GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set")
+	}
+	return &gmailMailer{
+		fromAddress: fromAddress,
+		appPassword: appPassword,
+	}
+}
+
+func (m *gmailMailer) SendMail(to, subject, htmlBody string) error {
+	auth := smtp.PlainAuth("", m.fromAddress, m.appPassword, "smtp.gmail.com")
+
+	var msg strings.Builder
+	msg.WriteString("From: " + m.fromAddress + "\r\n")
+	msg.WriteString("To: " + to + "\r\n")
+	msg.WriteString("Subject: " + subject + "\r\n")
+	msg.WriteString("MIME-Version: 1.0\r\n")
+	msg.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
+	msg.WriteString("\r\n")
+	msg.WriteString(htmlBody)
+
+	return smtp.SendMail("smtp.gmail.com:587", auth, m.fromAddress, []string{to}, []byte(msg.String()))
+}
+END_FILE:internal/platform/mailer/gmail_mailer.go
 # path: internal/adapters/http/resources/routes.go | lang: go | tokens: 274 | size: 1099
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/resources/routes.go
@@ -14688,6 +15674,32 @@ BEGIN_FILE:public/index.html
 </body>
 </html>
 END_FILE:public/index.html
+# path: internal/domain/auth/repository.go | lang: go | tokens: 260 | size: 1040
+# imports: context
+BEGIN_FILE:internal/domain/auth/repository.go
+package auth
+
+import "context"
+
+// Repository defines the persistence-facing ports for user-related operations.
+type Repository interface {
+	Create(ctx context.Context, user *User) error
+	GetByEmail(ctx context.Context, email string) (*User, error)
+	GetByPhoneNumber(ctx context.Context, phone string) (*User, error)
+	GetByID(ctx context.Context, id uint) (*User, error)
+	Update(ctx context.Context, user *User) error
+
+	SaveRefreshToken(ctx context.Context, token *RefreshToken) error
+	GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error)
+	RevokeRefreshToken(ctx context.Context, tokenHash string) error
+	RevokeAllUserRefreshTokens(ctx context.Context, userID uint) error
+
+	CreateEmailVerification(ctx context.Context, ev *EmailVerification) error
+	GetEmailVerificationByToken(ctx context.Context, token string) (*EmailVerification, error)
+	GetActiveEmailVerificationByUserID(ctx context.Context, userID uint) (*EmailVerification, error)
+	UpdateEmailVerification(ctx context.Context, ev *EmailVerification) error
+}
+END_FILE:internal/domain/auth/repository.go
 # path: internal/domain/messages/repository.go | lang: go | tokens: 256 | size: 1026
 # imports: context
 BEGIN_FILE:internal/domain/messages/repository.go
@@ -14785,6 +15797,79 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/people/routes.go
+# path: internal/domain/auth/entity.go | lang: go | tokens: 242 | size: 968
+# imports: time
+BEGIN_FILE:internal/domain/auth/entity.go
+package auth
+
+import "time"
+
+// User represents a user entity in the domain.
+type User struct {
+	ID             uint      `json:"id"`
+	FirstName      string    `json:"first_name"`
+	LastName       string    `json:"last_name"`
+	Email          string    `json:"email"`
+	PhoneNumber    string    `json:"phone_number"`
+	IsVerified     bool      `json:"is_verified"`
+	HashedPassword string    `json:"-"`
+	ProfilePic     string    `json:"profile_pic"`
+	City           string    `json:"city"`
+	Country        string    `json:"country"`
+	DateOfBirth    time.Time `json:"date_of_birth"`
+	LastLoginAt    time.Time `json:"last_login_at"`
+}
+
+type RefreshToken struct {
+	ID        uint
+	UserID    uint
+	TokenHash string
+	ExpiresAt int64
+	Revoked   bool
+}
+
+type EmailVerification struct {
+	ID        uint       `json:"id"`
+	UserID    uint       `json:"user_id"`
+	Token     string     `json:"token"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	UsedAt    *time.Time `json:"used_at"`
+}
+
+END_FILE:internal/domain/auth/entity.go
+# path: internal/domain/attendance/entity.go | lang: go | tokens: 241 | size: 966
+BEGIN_FILE:internal/domain/attendance/entity.go
+package attendance
+
+import (
+	"time"
+)
+
+type Attendance struct {
+	ID             uint       `json:"id"`
+	UserID         uint       `json:"user_id"`
+	Date           time.Time  `json:"date"`
+	CheckInTime    *time.Time `json:"check_in_time"`
+	CheckOutTime   *time.Time `json:"check_out_time"`
+	OrganisationID uint       `json:"organisation_id"`
+	CheckInPhoto   int        `json:"check_in_photo"`
+	CheckOutPhoto  int        `json:"check_out_photo"`
+	DurationMinutes *int      `json:"duration_minutes"`
+}
+
+type AttendanceSummary struct {
+	TotalDaysPresent       int     `json:"total_days_present"`
+	TotalDaysAbsent        int     `json:"total_days_absent"`
+	AverageCheckInTime     string  `json:"average_check_in_time"`
+	AverageDurationMinutes int     `json:"average_duration_minutes"`
+	OnTimePercentage       float64 `json:"on_time_percentage"`
+}
+
+type AttendanceHistory struct {
+	Records []Attendance      `json:"records"`
+	Summary AttendanceSummary `json:"summary"`
+}
+END_FILE:internal/domain/attendance/entity.go
 # path: internal/adapters/repository/files/gorm_repository.go | lang: go | tokens: 241 | size: 967
 # functions: NewGormRepository
 BEGIN_FILE:internal/adapters/repository/files/gorm_repository.go
@@ -14834,39 +15919,6 @@ func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.File, er
 	}, nil
 }
 END_FILE:internal/adapters/repository/files/gorm_repository.go
-# path: internal/domain/attendance/entity.go | lang: go | tokens: 241 | size: 966
-BEGIN_FILE:internal/domain/attendance/entity.go
-package attendance
-
-import (
-	"time"
-)
-
-type Attendance struct {
-	ID             uint       `json:"id"`
-	UserID         uint       `json:"user_id"`
-	Date           time.Time  `json:"date"`
-	CheckInTime    *time.Time `json:"check_in_time"`
-	CheckOutTime   *time.Time `json:"check_out_time"`
-	OrganisationID uint       `json:"organisation_id"`
-	CheckInPhoto   int        `json:"check_in_photo"`
-	CheckOutPhoto  int        `json:"check_out_photo"`
-	DurationMinutes *int      `json:"duration_minutes"`
-}
-
-type AttendanceSummary struct {
-	TotalDaysPresent       int     `json:"total_days_present"`
-	TotalDaysAbsent        int     `json:"total_days_absent"`
-	AverageCheckInTime     string  `json:"average_check_in_time"`
-	AverageDurationMinutes int     `json:"average_duration_minutes"`
-	OnTimePercentage       float64 `json:"on_time_percentage"`
-}
-
-type AttendanceHistory struct {
-	Records []Attendance      `json:"records"`
-	Summary AttendanceSummary `json:"summary"`
-}
-END_FILE:internal/domain/attendance/entity.go
 # path: internal/usecase/organisation/usecase.go | lang: go | tokens: 234 | size: 936
 # functions: NewService
 BEGIN_FILE:internal/usecase/organisation/usecase.go
@@ -15019,28 +16071,6 @@ func (s *service) GetEvents(ctx context.Context, req domain.GetEventsRequest) ([
 	return events, nil
 }
 END_FILE:internal/usecase/calendar/usecase.go
-# path: internal/domain/chats/repository.go | lang: go | tokens: 228 | size: 914
-# imports: context
-BEGIN_FILE:internal/domain/chats/repository.go
-package chats
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, chat *Chat) error
-	ListByOrganisation(ctx context.Context, organisationID uint) ([]Chat, error)
-	ListByUser(ctx context.Context, userID uint, orgID uint) ([]Chat, error)
-	GetByID(ctx context.Context, chatID uint) (*Chat, error)
-	GetByRoomID(ctx context.Context, roomID string) (*Chat, error)
-	UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error
-	IncrementMessageCount(ctx context.Context, id uint) error
-	GetOrCreateDM(ctx context.Context, userA uint, userB uint, orgID uint) (*Chat, error)
-	AddParticipant(ctx context.Context, chatID uint, userID uint) error
-	UpdateUnreadCount(ctx context.Context, chatID uint, userID uint, delta int) error
-	ResetUnreadCount(ctx context.Context, chatID uint, userID uint) error
-	GetParticipants(ctx context.Context, chatID uint) ([]ChatParticipant, error)
-}
-END_FILE:internal/domain/chats/repository.go
 # path: internal/platform/database/models/research_reference_model.go | lang: go | tokens: 228 | size: 913
 # imports: gorm.io/gorm
 BEGIN_FILE:internal/platform/database/models/research_reference_model.go
@@ -15066,6 +16096,52 @@ type ResearchReference struct {
 	CreatedBy      uint   `gorm:"not null" json:"created_by"`
 }
 END_FILE:internal/platform/database/models/research_reference_model.go
+# path: internal/domain/chats/repository.go | lang: go | tokens: 228 | size: 914
+# imports: context
+BEGIN_FILE:internal/domain/chats/repository.go
+package chats
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, chat *Chat) error
+	ListByOrganisation(ctx context.Context, organisationID uint) ([]Chat, error)
+	ListByUser(ctx context.Context, userID uint, orgID uint) ([]Chat, error)
+	GetByID(ctx context.Context, chatID uint) (*Chat, error)
+	GetByRoomID(ctx context.Context, roomID string) (*Chat, error)
+	UpdateLastMessage(ctx context.Context, id uint, message string, at *string) error
+	IncrementMessageCount(ctx context.Context, id uint) error
+	GetOrCreateDM(ctx context.Context, userA uint, userB uint, orgID uint) (*Chat, error)
+	AddParticipant(ctx context.Context, chatID uint, userID uint) error
+	UpdateUnreadCount(ctx context.Context, chatID uint, userID uint, delta int) error
+	ResetUnreadCount(ctx context.Context, chatID uint, userID uint) error
+	GetParticipants(ctx context.Context, chatID uint) ([]ChatParticipant, error)
+}
+END_FILE:internal/domain/chats/repository.go
+# path: internal/domain/auth/usecase.go | lang: go | tokens: 222 | size: 890
+# imports: context
+BEGIN_FILE:internal/domain/auth/usecase.go
+package auth
+
+import "context"
+
+// UseCase defines the application-facing ports for authentication operations.
+type UseCase interface {
+	SignUp(ctx context.Context, user *User, password string) (TokenPair, error)
+	SignIn(ctx context.Context, email, password string) (TokenPair, error)
+	CompleteSignIn(ctx context.Context, email, phone, password, city, country, profilePic string) (TokenPair, error)
+	ValidateEmployee(ctx context.Context, userID uint) (string, error)
+	RefreshToken(ctx context.Context, refreshToken string) (TokenPair, error)
+	Logout(ctx context.Context, refreshToken string) error
+	SendVerificationEmail(ctx context.Context, userID uint) error
+	VerifyEmail(ctx context.Context, token string) error
+	GetMe(ctx context.Context, userID uint) (TokenPair, error)
+}
+type TokenPair struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+END_FILE:internal/domain/auth/usecase.go
 # path: internal/domain/leave/usecase.go | lang: go | tokens: 217 | size: 870
 BEGIN_FILE:internal/domain/leave/usecase.go
 package leave
@@ -15109,6 +16185,46 @@ type ResearchFolder struct {
 	Files      []ResearchFile     `gorm:"foreignKey:FolderID" json:"files,omitempty"`
 }
 END_FILE:internal/platform/database/models/research_folder_model.go
+# path: cmd/server/main.go | lang: go | tokens: 212 | size: 851
+# functions: init, main
+BEGIN_FILE:cmd/server/main.go
+package main
+
+import (
+	"server/internal/app/routes"
+	"server/internal/platform/database"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+)
+
+func init() {
+	godotenv.Load(".env")
+	database.Init()
+
+}
+
+func main() {
+	// Perform database migrations
+	if err := database.PerformMigrations(); err != nil {
+		panic("Failed to perform database migrations: " + err.Error())
+	}
+	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowOriginFunc: func(origin string) bool {
+			return true
+		},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length", "Authorization"},
+		AllowCredentials: true,
+	}))
+	routes.SetupRoutes(r)
+
+	r.Run(":8000")
+}
+END_FILE:cmd/server/main.go
 # path: internal/adapters/http/employees/routes.go | lang: go | tokens: 211 | size: 846
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/employees/routes.go
@@ -15139,44 +16255,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/employees/routes.go
-# path: cmd/server/main.go | lang: go | tokens: 210 | size: 842
-# functions: init, main
-BEGIN_FILE:cmd/server/main.go
-package main
-
-import (
-	"server/internal/platform/database"
-	"server/internal/app/routes"
-
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
-)
-
-func init() {
-	godotenv.Load()
-	database.Init()
-}
-
-func  main() {
-	// Perform database migrations
-	if err := database.PerformMigrations(); err != nil {
-		panic("Failed to perform database migrations: " + err.Error())
-	}
-	r := gin.Default()
-	r.Use(cors.New(cors.Config{
-		AllowOriginFunc: func(origin string) bool {
-			return true
-		},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length", "Authorization"},
-		AllowCredentials: true,
-	}))
-	routes.SetupRoutes(r)
-	r.Run(":8000")
-}
-END_FILE:cmd/server/main.go
 # path: internal/domain/projects/usecase.go | lang: go | tokens: 193 | size: 775
 # imports: context
 BEGIN_FILE:internal/domain/projects/usecase.go
@@ -15347,6 +16425,29 @@ type UseCase interface {
 	GetEmployeeAttendanceHistory(ctx context.Context, userID uint, from *time.Time, to *time.Time, limit int, offset int) (*AttendanceHistory, error)
 }
 END_FILE:internal/domain/attendance/usecase.go
+# path: internal/domain/invites/entity.go | lang: go | tokens: 170 | size: 682
+# imports: time
+BEGIN_FILE:internal/domain/invites/entity.go
+package invites
+
+import "time"
+
+type EmployeeInvite struct {
+	ID              uint       `json:"id"`
+	Token           string     `json:"token"`
+	Email           string     `json:"email"`
+	FirstName       string     `json:"first_name"`
+	LastName        string     `json:"last_name"`
+	PhoneNumber     string     `json:"phone_number"`
+	EmploymentID    int        `json:"employment_id"`
+	OrganisationID  uint       `json:"organisation_id"`
+	InvitedByUserID uint       `json:"invited_by_user_id"`
+	Status          string     `json:"status"`
+	ExpiresAt       time.Time  `json:"expires_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	AcceptedAt      *time.Time `json:"accepted_at"`
+}
+END_FILE:internal/domain/invites/entity.go
 # path: internal/domain/tasks/usecase.go | lang: go | tokens: 169 | size: 677
 # imports: context
 BEGIN_FILE:internal/domain/tasks/usecase.go
@@ -15516,29 +16617,6 @@ type OnboardingProgress struct {
 	UpdatedAt         time.Time `json:"updatedAt"`
 }
 END_FILE:internal/platform/database/models/onboarding_progress_model.go
-# path: internal/domain/auth/entity.go | lang: go | tokens: 157 | size: 628
-# imports: time
-BEGIN_FILE:internal/domain/auth/entity.go
-package auth
-
-import "time"
-
-// User represents a user entity in the domain.
-type User struct {
-	ID             uint      `json:"id"`
-	FirstName      string    `json:"first_name"`
-	LastName       string    `json:"last_name"`
-	Email          string    `json:"email"`
-	PhoneNumber    string    `json:"phone_number"`
-	IsVerified     bool      `json:"is_verified"`
-	HashedPassword string    `json:"-"`
-	ProfilePic     string    `json:"profile_pic"`
-	City           string    `json:"city"`
-	Country        string    `json:"country"`
-	DateOfBirth    time.Time `json:"date_of_birth"`
-	LastLoginAt    time.Time `json:"last_login_at"`
-}
-END_FILE:internal/domain/auth/entity.go
 # path: internal/adapters/http/calls/handler.go | lang: go | tokens: 155 | size: 621
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/calls/handler.go
@@ -15577,6 +16655,25 @@ func (h *Handler) HandleRoom(c *gin.Context) {
 	h.uc.HandleRoom(c.Request.Context(), roomID, ws)
 }
 END_FILE:internal/adapters/http/calls/handler.go
+# path: internal/domain/invites/repository.go | lang: go | tokens: 153 | size: 612
+BEGIN_FILE:internal/domain/invites/repository.go
+package invites
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+	employeesDomain "server/internal/domain/employees"
+)
+
+type Repository interface {
+	Create(ctx context.Context, invite *EmployeeInvite) error
+	GetByToken(ctx context.Context, token string) (*EmployeeInvite, error)
+	GetByEmail(ctx context.Context, email string, orgID uint) (*EmployeeInvite, error)
+	MarkAccepted(ctx context.Context, id uint) error
+	GetByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
+	AcceptInvite(ctx context.Context, inviteID uint, user *authDomain.User, employee *employeesDomain.Employee) error
+}
+END_FILE:internal/domain/invites/repository.go
 # path: internal/usecase/analytics/usecase.go | lang: go | tokens: 152 | size: 609
 # functions: NewService
 BEGIN_FILE:internal/usecase/analytics/usecase.go
@@ -15603,25 +16700,31 @@ func (s *service) GetOrgEmployeeMonitor(ctx context.Context, orgID uint) ([]anal
 	return s.repo.GetOrgEmployeeMonitor(ctx, orgID)
 }
 END_FILE:internal/usecase/analytics/usecase.go
-# path: internal/domain/leave/repository.go | lang: go | tokens: 149 | size: 598
-BEGIN_FILE:internal/domain/leave/repository.go
-package leave
+# path: internal/adapters/http/auth/routes.go | lang: go | tokens: 150 | size: 601
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/auth/routes.go
+package auth
 
 import (
-	"context"
-	"time"
+	"github.com/gin-gonic/gin"
 )
 
-type Repository interface {
-	Create(ctx context.Context, leave *Leave) error
-	GetByID(ctx context.Context, id uint) (*Leave, error)
-	GetByEmployee(ctx context.Context, employeeID uint, offset int) ([]Leave, error)
-	GetByOrganisation(ctx context.Context, orgID uint, status string, offset int) ([]Leave, error)
-	GetHistoryByEmployee(ctx context.Context, employeeID uint, status string, from *time.Time, to *time.Time, limit int, offset int) ([]Leave, error)
-	Update(ctx context.Context, leave *Leave) error
-	Delete(ctx context.Context, id uint) error
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	r.POST("/api/v1/auth/signup", h.SignUp)
+	r.POST("/api/v1/auth/signin", h.SignIn)
+	r.GET("/api/v1/auth/verify-email", h.VerifyEmail)
+	r.POST("/api/v1/auth/refresh", h.RefreshToken)
+
+	authGroup := r.Group("/api/v1/auth")
+	authGroup.Use(validateToken)
+	{
+		authGroup.POST("/complete-signin", h.CompleteSignIn)
+		authGroup.GET("/validate-employee", h.ValidateEmployee)
+		authGroup.POST("/send-verification", h.SendVerificationEmail)
+		authGroup.GET("/me", h.GetMe)
+	}
 }
-END_FILE:internal/domain/leave/repository.go
+END_FILE:internal/adapters/http/auth/routes.go
 # path: internal/platform/database/models/notification_model.go | lang: go | tokens: 149 | size: 599
 # imports: gorm.io/gorm
 BEGIN_FILE:internal/platform/database/models/notification_model.go
@@ -15643,6 +16746,25 @@ type Notification struct {
 	Link             string        `json:"link"`
 }
 END_FILE:internal/platform/database/models/notification_model.go
+# path: internal/domain/leave/repository.go | lang: go | tokens: 149 | size: 598
+BEGIN_FILE:internal/domain/leave/repository.go
+package leave
+
+import (
+	"context"
+	"time"
+)
+
+type Repository interface {
+	Create(ctx context.Context, leave *Leave) error
+	GetByID(ctx context.Context, id uint) (*Leave, error)
+	GetByEmployee(ctx context.Context, employeeID uint, offset int) ([]Leave, error)
+	GetByOrganisation(ctx context.Context, orgID uint, status string, offset int) ([]Leave, error)
+	GetHistoryByEmployee(ctx context.Context, employeeID uint, status string, from *time.Time, to *time.Time, limit int, offset int) ([]Leave, error)
+	Update(ctx context.Context, leave *Leave) error
+	Delete(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/leave/repository.go
 # path: internal/domain/callstate/entity.go | lang: go | tokens: 148 | size: 592
 # imports: time
 BEGIN_FILE:internal/domain/callstate/entity.go
@@ -15830,6 +16952,25 @@ type Repository interface {
 	GetByID(ctx context.Context, attachmentID uint) (*TaskAttachment, error)
 }
 END_FILE:internal/domain/task_attachments/repository.go
+# path: internal/domain/notifications/entity.go | lang: go | tokens: 120 | size: 483
+# imports: time
+BEGIN_FILE:internal/domain/notifications/entity.go
+package notifications
+
+import "time"
+
+type Notification struct {
+	ID               uint      `json:"id"`
+	UserID           uint      `json:"user_id"`
+	OrganisationID   uint      `json:"organisation_id"`
+	Title            string    `json:"title"`
+	Message          string    `json:"message"`
+	IsRead           bool      `json:"is_read"`
+	NotificationType string    `json:"notification_type"`
+	Link             string    `json:"link"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+END_FILE:internal/domain/notifications/entity.go
 # path: internal/platform/database/models/invite_model.go | lang: go | tokens: 120 | size: 481
 BEGIN_FILE:internal/platform/database/models/invite_model.go
 package models
@@ -15850,45 +16991,6 @@ type Invite struct {
 	Status         string    `gorm:"size:50;not null;default:'pending'"` // e.g. pending, accepted, expired
 }
 END_FILE:internal/platform/database/models/invite_model.go
-# path: internal/domain/notifications/entity.go | lang: go | tokens: 120 | size: 483
-# imports: time
-BEGIN_FILE:internal/domain/notifications/entity.go
-package notifications
-
-import "time"
-
-type Notification struct {
-	ID               uint      `json:"id"`
-	UserID           uint      `json:"user_id"`
-	OrganisationID   uint      `json:"organisation_id"`
-	Title            string    `json:"title"`
-	Message          string    `json:"message"`
-	IsRead           bool      `json:"is_read"`
-	NotificationType string    `json:"notification_type"`
-	Link             string    `json:"link"`
-	CreatedAt        time.Time `json:"created_at"`
-}
-END_FILE:internal/domain/notifications/entity.go
-# path: internal/adapters/http/attendance/routes.go | lang: go | tokens: 119 | size: 479
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/attendance/routes.go
-package attendance
-
-import (
-	"github.com/gin-gonic/gin"
-)
-
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	attendanceGroup := r.Group("/api/v1/attendence")
-	attendanceGroup.Use(validateToken)
-	{
-		attendanceGroup.POST("/create", h.PostAttendance)
-		attendanceGroup.PUT("/:id", h.UpdateAttendance)
-		attendanceGroup.GET("/:id", h.GetAttendanceByDateAndUser)
-		attendanceGroup.GET("/employee/:userId/history", h.GetEmployeeAttendanceHistory)
-	}
-}
-END_FILE:internal/adapters/http/attendance/routes.go
 # path: internal/adapters/http/analytics/routes.go | lang: go | tokens: 119 | size: 477
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/analytics/routes.go
@@ -15909,6 +17011,26 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc, ro
 	}
 }
 END_FILE:internal/adapters/http/analytics/routes.go
+# path: internal/adapters/http/attendance/routes.go | lang: go | tokens: 119 | size: 479
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/attendance/routes.go
+package attendance
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	attendanceGroup := r.Group("/api/v1/attendence")
+	attendanceGroup.Use(validateToken)
+	{
+		attendanceGroup.POST("/create", h.PostAttendance)
+		attendanceGroup.PUT("/:id", h.UpdateAttendance)
+		attendanceGroup.GET("/:id", h.GetAttendanceByDateAndUser)
+		attendanceGroup.GET("/employee/:userId/history", h.GetEmployeeAttendanceHistory)
+	}
+}
+END_FILE:internal/adapters/http/attendance/routes.go
 # path: internal/domain/task_attachments/entity.go | lang: go | tokens: 118 | size: 473
 # imports: time
 BEGIN_FILE:internal/domain/task_attachments/entity.go
@@ -15927,21 +17049,6 @@ type TaskAttachment struct {
 	UploaderLastName  string    `json:"uploader_last_name"`
 }
 END_FILE:internal/domain/task_attachments/entity.go
-# path: internal/domain/auth/usecase.go | lang: go | tokens: 115 | size: 460
-# imports: context
-BEGIN_FILE:internal/domain/auth/usecase.go
-package auth
-
-import "context"
-
-// UseCase defines the application-facing ports for authentication operations.
-type UseCase interface {
-	SignUp(ctx context.Context, user *User, password string) (string, error)
-	SignIn(ctx context.Context, email, password string) (string, error)
-	CompleteSignIn(ctx context.Context, email, phone, password, city, country, profilePic string) (string, error)
-	ValidateEmployee(ctx context.Context, userID uint) (string, error)
-}
-END_FILE:internal/domain/auth/usecase.go
 # path: internal/domain/task_comments/repository.go | lang: go | tokens: 115 | size: 460
 BEGIN_FILE:internal/domain/task_comments/repository.go
 package task_comments
@@ -16025,6 +17132,22 @@ func (s *service) GetFile(ctx context.Context, id uint) (*domain.File, error) {
 	return s.repo.GetByID(ctx, id)
 }
 END_FILE:internal/usecase/files/usecase.go
+# path: internal/platform/database/models/research_collaborator_model.go | lang: go | tokens: 107 | size: 428
+# imports: gorm.io/gorm
+BEGIN_FILE:internal/platform/database/models/research_collaborator_model.go
+package models
+
+import "gorm.io/gorm"
+
+type ResearchCollaborator struct {
+	gorm.Model
+	ResearchID uint      `gorm:"index;not null" json:"research_id"`
+	UserID     uint      `gorm:"index;not null" json:"user_id"`
+	User       UserModel `gorm:"foreignKey:UserID" json:"user"`
+	Role       string    `gorm:"size:50;not null;default:'viewer'" json:"role"` // owner, editor, commenter, viewer
+	AddedBy    uint      `json:"added_by"`
+}
+END_FILE:internal/platform/database/models/research_collaborator_model.go
 # path: internal/platform/database/models/audit_log_model.go | lang: go | tokens: 107 | size: 431
 BEGIN_FILE:internal/platform/database/models/audit_log_model.go
 package models
@@ -16043,38 +17166,6 @@ type AuditLog struct {
 	Details        string `gorm:"type:text"`
 }
 END_FILE:internal/platform/database/models/audit_log_model.go
-# path: internal/platform/database/models/research_collaborator_model.go | lang: go | tokens: 107 | size: 428
-# imports: gorm.io/gorm
-BEGIN_FILE:internal/platform/database/models/research_collaborator_model.go
-package models
-
-import "gorm.io/gorm"
-
-type ResearchCollaborator struct {
-	gorm.Model
-	ResearchID uint      `gorm:"index;not null" json:"research_id"`
-	UserID     uint      `gorm:"index;not null" json:"user_id"`
-	User       UserModel `gorm:"foreignKey:UserID" json:"user"`
-	Role       string    `gorm:"size:50;not null;default:'viewer'" json:"role"` // owner, editor, commenter, viewer
-	AddedBy    uint      `json:"added_by"`
-}
-END_FILE:internal/platform/database/models/research_collaborator_model.go
-# path: internal/domain/auth/repository.go | lang: go | tokens: 105 | size: 420
-# imports: context
-BEGIN_FILE:internal/domain/auth/repository.go
-package auth
-
-import "context"
-
-// Repository defines the persistence-facing ports for user-related operations.
-type Repository interface {
-	Create(ctx context.Context, user *User) error
-	GetByEmail(ctx context.Context, email string) (*User, error)
-	GetByPhoneNumber(ctx context.Context, phone string) (*User, error)
-	GetByID(ctx context.Context, id uint) (*User, error)
-	Update(ctx context.Context, user *User) error
-}
-END_FILE:internal/domain/auth/repository.go
 # path: internal/adapters/http/organisation/routes.go | lang: go | tokens: 105 | size: 420
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/organisation/routes.go
@@ -16129,27 +17220,6 @@ type TaskAttachment struct {
 	UploadedByUser UserModel `gorm:"foreignKey:UploadedBy"`
 }
 END_FILE:internal/platform/database/models/task_attachment_model.go
-# path: internal/adapters/http/auth/routes.go | lang: go | tokens: 101 | size: 407
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/auth/routes.go
-package auth
-
-import (
-	"github.com/gin-gonic/gin"
-)
-
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	r.POST("/api/v1/auth/signup", h.SignUp)
-	r.POST("/api/v1/auth/signin", h.SignIn)
-	
-	authGroup := r.Group("/api/v1/auth")
-	authGroup.Use(validateToken)
-	{
-		authGroup.POST("/complete-signin", h.CompleteSignIn)
-		authGroup.GET("/validate-employee", h.ValidateEmployee)
-	}
-}
-END_FILE:internal/adapters/http/auth/routes.go
 # path: internal/domain/chats/usecase.go | lang: go | tokens: 101 | size: 404
 # imports: context
 BEGIN_FILE:internal/domain/chats/usecase.go
@@ -16283,6 +17353,21 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/callstate/routes.go
+# path: internal/domain/invites/usecase.go | lang: go | tokens: 86 | size: 347
+BEGIN_FILE:internal/domain/invites/usecase.go
+package invites
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+)
+
+type UseCase interface {
+	InviteEmployee(ctx context.Context, invite *EmployeeInvite) error
+	AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error)
+	GetInvitesByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
+}
+END_FILE:internal/domain/invites/usecase.go
 # path: internal/adapters/http/messages/routes.go | lang: go | tokens: 85 | size: 340
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
@@ -16359,20 +17444,20 @@ type WorkSchedule struct {
 	ScheduleData   string `gorm:"type:text"`         // JSON or text describing work hours per day
 }
 END_FILE:internal/platform/database/models/work_schedule_model.go
-# path: internal/domain/callstate/repository.go | lang: go | tokens: 79 | size: 319
-# imports: context
-BEGIN_FILE:internal/domain/callstate/repository.go
-package callstate
+# path: internal/adapters/http/invites/routes.go | lang: go | tokens: 79 | size: 317
+# imports: github.com/gin-gonic/gin
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/invites/routes.go
+package invites
 
-import "context"
+import "github.com/gin-gonic/gin"
 
-type Repository interface {
-	CreateOrUpdate(ctx context.Context, state *State) error
-	GetByID(ctx context.Context, id uint) (*State, error)
-	UpdateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
-	EndCall(ctx context.Context, id uint) error
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	r.POST("/api/v1/employees/invite", validateToken, h.InviteEmployee)
+	r.POST("/api/v1/invites/accept", h.AcceptInvite) // public
+	r.GET("/api/v1/invites", validateToken, h.GetInvites)
 }
-END_FILE:internal/domain/callstate/repository.go
+END_FILE:internal/adapters/http/invites/routes.go
 # path: internal/adapters/http/onboarding/routes.go | lang: go | tokens: 79 | size: 316
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/onboarding/routes.go
@@ -16391,23 +17476,20 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/onboarding/routes.go
-# path: internal/platform/database/models/task_comment_model.go | lang: go | tokens: 78 | size: 313
-BEGIN_FILE:internal/platform/database/models/task_comment_model.go
-package models
+# path: internal/domain/callstate/repository.go | lang: go | tokens: 79 | size: 319
+# imports: context
+BEGIN_FILE:internal/domain/callstate/repository.go
+package callstate
 
-import (
-	"time"
-)
+import "context"
 
-type TaskComment struct {
-	ID        uint      `gorm:"primaryKey"`
-	TaskID    uint      `gorm:"index;not null"`
-	UserID    uint      `gorm:"index;not null"`
-	Content   string    `gorm:"type:text;not null"`
-	CreatedAt time.Time
-	User      UserModel `gorm:"foreignKey:UserID"`
+type Repository interface {
+	CreateOrUpdate(ctx context.Context, state *State) error
+	GetByID(ctx context.Context, id uint) (*State, error)
+	UpdateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
+	EndCall(ctx context.Context, id uint) error
 }
-END_FILE:internal/platform/database/models/task_comment_model.go
+END_FILE:internal/domain/callstate/repository.go
 # path: internal/platform/database/models/role_permissions_model.go | lang: go | tokens: 78 | size: 312
 BEGIN_FILE:internal/platform/database/models/role_permissions_model.go
 package models
@@ -16437,6 +17519,37 @@ type UseCase interface {
 	EndCall(ctx context.Context, id uint) error
 }
 END_FILE:internal/domain/callstate/usecase.go
+# path: internal/platform/database/models/task_comment_model.go | lang: go | tokens: 78 | size: 313
+BEGIN_FILE:internal/platform/database/models/task_comment_model.go
+package models
+
+import (
+	"time"
+)
+
+type TaskComment struct {
+	ID        uint      `gorm:"primaryKey"`
+	TaskID    uint      `gorm:"index;not null"`
+	UserID    uint      `gorm:"index;not null"`
+	Content   string    `gorm:"type:text;not null"`
+	CreatedAt time.Time
+	User      UserModel `gorm:"foreignKey:UserID"`
+}
+END_FILE:internal/platform/database/models/task_comment_model.go
+# path: internal/domain/task_comments/usecase.go | lang: go | tokens: 77 | size: 311
+BEGIN_FILE:internal/domain/task_comments/usecase.go
+package task_comments
+
+import (
+	"context"
+)
+
+type UseCase interface {
+	AddComment(ctx context.Context, taskID uint, userID uint, content string) (*TaskComment, error)
+	GetComments(ctx context.Context, taskID uint) ([]TaskComment, error)
+	DeleteComment(ctx context.Context, commentID uint, userID uint) error
+}
+END_FILE:internal/domain/task_comments/usecase.go
 # path: internal/platform/database/models/task_activity_model.go | lang: go | tokens: 77 | size: 309
 BEGIN_FILE:internal/platform/database/models/task_activity_model.go
 package models
@@ -16469,20 +17582,6 @@ type AttendancePolicy struct {
 	GracePeriodMins int   `gorm:"default:15"`
 }
 END_FILE:internal/platform/database/models/attendance_policy_model.go
-# path: internal/domain/task_comments/usecase.go | lang: go | tokens: 77 | size: 311
-BEGIN_FILE:internal/domain/task_comments/usecase.go
-package task_comments
-
-import (
-	"context"
-)
-
-type UseCase interface {
-	AddComment(ctx context.Context, taskID uint, userID uint, content string) (*TaskComment, error)
-	GetComments(ctx context.Context, taskID uint) ([]TaskComment, error)
-	DeleteComment(ctx context.Context, commentID uint, userID uint) error
-}
-END_FILE:internal/domain/task_comments/usecase.go
 # path: internal/platform/database/models/file_model.go | lang: go | tokens: 74 | size: 297
 # imports: gorm.io/gorm
 BEGIN_FILE:internal/platform/database/models/file_model.go
@@ -16715,18 +17814,6 @@ type UseCase interface {
 	Search(ctx context.Context, filters *SearchFilters) (*SearchResults, error)
 }
 END_FILE:internal/domain/search/usecase.go
-# path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
-# imports: context
-BEGIN_FILE:internal/domain/files/usecase.go
-package files
-
-import "context"
-
-type UseCase interface {
-	UploadFile(ctx context.Context, file *File) error
-	GetFile(ctx context.Context, id uint) (*File, error)
-}
-END_FILE:internal/domain/files/usecase.go
 # path: internal/domain/files/repository.go | lang: go | tokens: 41 | size: 164
 # imports: context
 BEGIN_FILE:internal/domain/files/repository.go
@@ -16739,6 +17826,18 @@ type Repository interface {
 	GetByID(ctx context.Context, id uint) (*File, error)
 }
 END_FILE:internal/domain/files/repository.go
+# path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
+# imports: context
+BEGIN_FILE:internal/domain/files/usecase.go
+package files
+
+import "context"
+
+type UseCase interface {
+	UploadFile(ctx context.Context, file *File) error
+	GetFile(ctx context.Context, id uint) (*File, error)
+}
+END_FILE:internal/domain/files/usecase.go
 # path: internal/domain/calls/usecase.go | lang: go | tokens: 41 | size: 165
 BEGIN_FILE:internal/domain/calls/usecase.go
 package calls
@@ -16783,38 +17882,22 @@ package websocket
 // PresenceTracker can be used for future extension of presence logic
 type PresenceTracker struct{}
 END_FILE:internal/platform/websocket/presence_tracker.go
-# path: internal/adapters/http/settings/routes.go | lang: go | tokens: 4 | size: 17
-BEGIN_FILE:internal/adapters/http/settings/routes.go
-package settings
-END_FILE:internal/adapters/http/settings/routes.go
 # path: internal/adapters/repository/settings/gorm_repository.go | lang: go | tokens: 4 | size: 16
 BEGIN_FILE:internal/adapters/repository/settings/gorm_repository.go
 package settings
 END_FILE:internal/adapters/repository/settings/gorm_repository.go
-# path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/http/milestones/handler.go
-package milestone
-END_FILE:internal/adapters/http/milestones/handler.go
-# path: internal/domain/settings/repository.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/domain/settings/repository.go
+# path: internal/adapters/http/settings/routes.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/http/settings/routes.go
 package settings
-END_FILE:internal/domain/settings/repository.go
-# path: internal/adapters/http/milestones/routes.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/http/milestones/routes.go
-package milestone
-END_FILE:internal/adapters/http/milestones/routes.go
-# path: internal/domain/analytics/usecase.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/domain/analytics/usecase.go
-package analytics
-END_FILE:internal/domain/analytics/usecase.go
+END_FILE:internal/adapters/http/settings/routes.go
 # path: internal/domain/settings/entity.go | lang: go | tokens: 4 | size: 16
 BEGIN_FILE:internal/domain/settings/entity.go
 package settings
 END_FILE:internal/domain/settings/entity.go
-# path: internal/adapters/http/settings/handler.go | lang: go | tokens: 4 | size: 17
-BEGIN_FILE:internal/adapters/http/settings/handler.go
+# path: internal/usecase/settings/usecase.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/usecase/settings/usecase.go
 package settings
-END_FILE:internal/adapters/http/settings/handler.go
+END_FILE:internal/usecase/settings/usecase.go
 # path: internal/domain/settings/usecase.go | lang: go | tokens: 4 | size: 16
 BEGIN_FILE:internal/domain/settings/usecase.go
 package settings
@@ -16823,66 +17906,54 @@ END_FILE:internal/domain/settings/usecase.go
 BEGIN_FILE:internal/domain/analytics/repository.go
 package analytics
 END_FILE:internal/domain/analytics/repository.go
-# path: internal/usecase/settings/usecase.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/usecase/settings/usecase.go
-package settings
-END_FILE:internal/usecase/settings/usecase.go
-# path: internal/adapters/repository/milestones/gorm_repository.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
-package milestones
-END_FILE:internal/adapters/repository/milestones/gorm_repository.go
 # path: internal/usecase/milestones/usecase.go | lang: go | tokens: 4 | size: 18
 BEGIN_FILE:internal/usecase/milestones/usecase.go
 package milestones
 END_FILE:internal/usecase/milestones/usecase.go
-# path: internal/adapters/repository/audit/gorm_repository.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/adapters/repository/audit/gorm_repository.go
-package audit
-END_FILE:internal/adapters/repository/audit/gorm_repository.go
-# path: internal/domain/invites/usecase.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/domain/invites/usecase.go
-package invites
-END_FILE:internal/domain/invites/usecase.go
-# path: internal/domain/invites/repository.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/domain/invites/repository.go
-package invites
-END_FILE:internal/domain/invites/repository.go
-# path: internal/domain/invites/entity.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/domain/invites/entity.go
-package invites
-END_FILE:internal/domain/invites/entity.go
+# path: internal/domain/analytics/usecase.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/domain/analytics/usecase.go
+package analytics
+END_FILE:internal/domain/analytics/usecase.go
+# path: internal/adapters/repository/milestones/gorm_repository.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
+package milestones
+END_FILE:internal/adapters/repository/milestones/gorm_repository.go
+# path: internal/domain/settings/repository.go | lang: go | tokens: 4 | size: 16
+BEGIN_FILE:internal/domain/settings/repository.go
+package settings
+END_FILE:internal/domain/settings/repository.go
+# path: internal/adapters/http/settings/handler.go | lang: go | tokens: 4 | size: 17
+BEGIN_FILE:internal/adapters/http/settings/handler.go
+package settings
+END_FILE:internal/adapters/http/settings/handler.go
+# path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/milestones/handler.go
+package milestone
+END_FILE:internal/adapters/http/milestones/handler.go
+# path: internal/adapters/http/milestones/routes.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/milestones/routes.go
+package milestone
+END_FILE:internal/adapters/http/milestones/routes.go
 # path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
 BEGIN_FILE:internal/domain/audit/usecase.go
 package audit
 END_FILE:internal/domain/audit/usecase.go
+# path: internal/domain/milestones/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/usecase.go
+package entity
+END_FILE:internal/domain/milestones/usecase.go
+# path: internal/adapters/repository/audit/gorm_repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/adapters/repository/audit/gorm_repository.go
+package audit
+END_FILE:internal/adapters/repository/audit/gorm_repository.go
 # path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/domain/audit/repository.go
 package audit
 END_FILE:internal/domain/audit/repository.go
-# path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/domain/audit/entity.go
-package audit
-END_FILE:internal/domain/audit/entity.go
-# path: internal/adapters/repository/invites/gorm_repository.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/adapters/repository/invites/gorm_repository.go
-package invites
-END_FILE:internal/adapters/repository/invites/gorm_repository.go
-# path: internal/adapters/http/invites/handler.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/adapters/http/invites/handler.go
-package invites
-END_FILE:internal/adapters/http/invites/handler.go
-# path: internal/usecase/audit/usecase.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/usecase/audit/usecase.go
-package audit
-END_FILE:internal/usecase/audit/usecase.go
-# path: internal/adapters/http/invites/routes.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/adapters/http/invites/routes.go
-package invites
-END_FILE:internal/adapters/http/invites/routes.go
-# path: internal/usecase/invites/usecase.go | lang: go | tokens: 3 | size: 15
-BEGIN_FILE:internal/usecase/invites/usecase.go
-package invites
-END_FILE:internal/usecase/invites/usecase.go
+# path: internal/domain/milestones/repository.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/repository.go
+package entity
+END_FILE:internal/domain/milestones/repository.go
 # path: internal/adapters/http/audit/routes.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/adapters/http/audit/routes.go
 package audit
@@ -16891,16 +17962,16 @@ END_FILE:internal/adapters/http/audit/routes.go
 BEGIN_FILE:internal/adapters/http/audit/handler.go
 package audit
 END_FILE:internal/adapters/http/audit/handler.go
-# path: internal/domain/milestones/usecase.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/usecase.go
-package entity
-END_FILE:internal/domain/milestones/usecase.go
-# path: internal/domain/milestones/repository.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/repository.go
-package entity
-END_FILE:internal/domain/milestones/repository.go
 # path: internal/domain/milestones/entity.go | lang: go | tokens: 3 | size: 14
 BEGIN_FILE:internal/domain/milestones/entity.go
 package entity
 END_FILE:internal/domain/milestones/entity.go
-# included: 236 / 236 | total tokens: 119998
+# path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/entity.go
+package audit
+END_FILE:internal/domain/audit/entity.go
+# path: internal/usecase/audit/usecase.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/usecase/audit/usecase.go
+package audit
+END_FILE:internal/usecase/audit/usecase.go
+# included: 237 / 237 | total tokens: 128341

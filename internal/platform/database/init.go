@@ -90,6 +90,7 @@ func PerformMigrations() error {
 		&models.PeopleList{},
 		&models.PeopleListContact{},
 		&models.RefreshToken{},
+		&models.NotificationPreference{},
 	)
 	if err != nil {
 		return err
