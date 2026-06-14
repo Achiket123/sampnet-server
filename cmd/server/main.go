@@ -2,6 +2,7 @@ package main
 
 import (
 	"server/internal/app/routes"
+	"server/internal/platform/cloudinary"
 	"server/internal/platform/database"
 
 	"github.com/gin-contrib/cors"
@@ -12,7 +13,7 @@ import (
 func init() {
 	godotenv.Load(".env")
 	database.Init()
-
+	cloudinary.Init()
 }
 
 func main() {

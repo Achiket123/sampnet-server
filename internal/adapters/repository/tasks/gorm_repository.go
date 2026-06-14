@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"fmt"
 	authDomain "server/internal/domain/auth"
 	domain "server/internal/domain/tasks"
 	orgDomain "server/internal/domain/organisation"
@@ -22,6 +23,36 @@ func NewGormRepository(db *gorm.DB) domain.Repository {
 }
 
 func (r *gormRepository) Create(ctx context.Context, task *domain.Task) error {
+	// 1. Verify/link TaskType to TaskType table
+	var count int64
+	if err := r.db.WithContext(ctx).Model(&models.TaskType{}).Where("organisation_id = ?", task.OrganisationID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		// Seed default task types for this organisation on the fly
+		defaultTaskTypes := []models.TaskType{
+			{OrganisationID: task.OrganisationID, Name: "Bug", Description: "Software bugs, issues, or defects"},
+			{OrganisationID: task.OrganisationID, Name: "Feature", Description: "New functionality or improvements"},
+			{OrganisationID: task.OrganisationID, Name: "Story", Description: "User stories or general tasks"},
+		}
+		for _, tt := range defaultTaskTypes {
+			if err := r.db.WithContext(ctx).Create(&tt).Error; err != nil {
+				return err
+			}
+		}
+	}
+
+	// Double check validation
+	var typeCount int64
+	if err := r.db.WithContext(ctx).Model(&models.TaskType{}).
+		Where("organisation_id = ? AND (LOWER(name) = LOWER(?) OR name = ?)", task.OrganisationID, task.Type, task.Type).
+		Count(&typeCount).Error; err != nil {
+		return err
+	}
+	if typeCount == 0 {
+		return fmt.Errorf("invalid task type: %s does not exist in the task types configured for this organisation", task.Type)
+	}
+
 	model := toModel(task)
 	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
 		return err

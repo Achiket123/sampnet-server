@@ -43,7 +43,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "file_id": fileDomain.ID})
+	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "file_id": fileDomain.ID, "url": fileDomain.URL})
 }
 
 func (h *Handler) GetFile(c *gin.Context) {
@@ -59,6 +59,5 @@ func (h *Handler) GetFile(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Type", file.FileType)
-	c.Data(http.StatusOK, file.FileType, file.Data)
+	c.Redirect(http.StatusFound, file.URL)
 }

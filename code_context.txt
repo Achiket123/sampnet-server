@@ -1,6 +1,6 @@
 # Code Context
-# Generated: 2026-06-12T15:16:15+05:30
-# Files: 237
+# Generated: 2026-06-14T21:21:03+05:30
+# Files: 240
 #
 # To extract all files back to disk, run:
 #   awk '/^BEGIN_FILE:/{f=substr($0,11); sub(/^:/, "", f); next} /^END_FILE:/{f=""; next} f{print > f}' code_context.txt
@@ -2724,6 +2724,569 @@ func isValidStatus(status string) bool {
 	return false
 }
 END_FILE:internal/usecase/research/usecase.go
+# path: internal/adapters/http/settings/handler.go | lang: go | tokens: 3627 | size: 14510
+# functions: NewHandler, getUserAuthInfo
+BEGIN_FILE:internal/adapters/http/settings/handler.go
+package settings
+
+import (
+	"net/http"
+	"server/internal/domain/settings"
+	"strconv"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc settings.UseCase
+}
+
+func NewHandler(uc settings.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func getUserAuthInfo(c *gin.Context) (uint, uint, string, bool) {
+	userIDVal, existsUser := c.Get("userID")
+	orgIDVal, existsOrg := c.Get("organisationID")
+	roleVal, existsRole := c.Get("role")
+	if !existsUser || !existsOrg || !existsRole {
+		return 0, 0, "", false
+	}
+	userID, okUser := userIDVal.(uint)
+	orgID, okOrg := orgIDVal.(uint)
+	role, okRole := roleVal.(string)
+	if !okUser || !okOrg || !okRole {
+		return 0, 0, "", false
+	}
+	return userID, orgID, role, true
+}
+
+func (h *Handler) GetOrgSettings(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	org, err := h.uc.GetOrgSettings(orgID, role)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"organisation": org})
+}
+
+func (h *Handler) UpdateOrgSettings(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req settings.OrgSettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.uc.UpdateOrgSettings(orgID, role, &req)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "organisation settings updated successfully"})
+}
+
+func (h *Handler) DeleteOrganisation(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		ConfirmationCode string `json:"confirmation_code"`
+	}
+	// Try parsing body, fallback to query param
+	_ = c.ShouldBindJSON(&req)
+	if req.ConfirmationCode == "" {
+		req.ConfirmationCode = c.Query("confirmation_code")
+	}
+
+	if req.ConfirmationCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "confirmation code is required"})
+		return
+	}
+
+	err := h.uc.DeleteOrganisation(orgID, role, req.ConfirmationCode)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		if err == settings.ErrInvalidInput {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid confirmation code"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "organisation deleted successfully"})
+}
+
+func (h *Handler) GetPlanInfo(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	plan, err := h.uc.GetPlanInfo(orgID, role)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"plan": plan})
+}
+
+func (h *Handler) GetRolePermissions(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	perms, err := h.uc.GetRolePermissions(orgID, role)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"role_permissions": perms})
+}
+
+func (h *Handler) UpdateRolePermissions(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		RolePermissions []settings.RolePermissionsSet `json:"role_permissions"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.uc.UpdateRolePermissions(orgID, role, req.RolePermissions)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "role permissions updated successfully"})
+}
+
+func (h *Handler) GetAttendancePolicy(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	policy, err := h.uc.GetAttendancePolicy(orgID, role)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"attendance_policy": policy})
+}
+
+func (h *Handler) UpdateAttendancePolicy(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req settings.AttendancePolicy
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.uc.UpdateAttendancePolicy(orgID, role, &req)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "attendance policy updated successfully"})
+}
+
+func (h *Handler) GetLeavePolicies(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	policies, err := h.uc.GetLeavePolicies(orgID, role)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"leave_policies": policies})
+}
+
+func (h *Handler) UpdateLeavePolicies(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		LeavePolicies []settings.LeavePolicyEntry `json:"leave_policies"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.uc.UpdateLeavePolicies(orgID, role, req.LeavePolicies)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "leave policies updated successfully"})
+}
+
+func (h *Handler) SaveLeavePolicy(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req settings.LeavePolicyEntry
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.uc.SaveLeavePolicy(orgID, role, &req)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, req)
+}
+
+func (h *Handler) DeleteLeavePolicy(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	idStr := c.Param("id")
+	policyID, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid leave policy id"})
+		return
+	}
+
+	err = h.uc.DeleteLeavePolicy(orgID, role, uint(policyID))
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "leave policy deleted successfully"})
+}
+
+func (h *Handler) GetTaskTypes(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	taskTypes, err := h.uc.GetTaskTypes(orgID, role)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"task_types": taskTypes})
+}
+
+func (h *Handler) SaveTaskType(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req settings.TaskTypeEntry
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.uc.SaveTaskType(orgID, role, &req)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"task_type": req})
+}
+
+func (h *Handler) DeleteTaskType(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	idStr := c.Param("id")
+	typeID, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task type id"})
+		return
+	}
+
+	err = h.uc.DeleteTaskType(orgID, role, uint(typeID))
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "task type deleted successfully"})
+}
+
+func (h *Handler) GetUserProfile(c *gin.Context) {
+	userID, _, _, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	profile, err := h.uc.GetUserProfile(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, profile)
+}
+
+func (h *Handler) UpdateUserProfile(c *gin.Context) {
+	userID, _, _, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		FirstName   string `json:"first_name"`
+		LastName    string `json:"last_name"`
+		PhoneNumber string `json:"phone_number"`
+		City        string `json:"city"`
+		Country     string `json:"country"`
+		DateOfBirth string `json:"date_of_birth"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var dob time.Time
+	if req.DateOfBirth != "" {
+		var err error
+		dob, err = time.Parse(time.RFC3339, req.DateOfBirth)
+		if err != nil {
+			// Fallback to simple date format if parse fails
+			dob, err = time.Parse("2006-01-02", req.DateOfBirth)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid date of birth format, use YYYY-MM-DD or RFC3339"})
+				return
+			}
+		}
+	}
+
+	profile := settings.UserProfile{
+		FirstName:   req.FirstName,
+		LastName:    req.LastName,
+		PhoneNumber: req.PhoneNumber,
+		City:        req.City,
+		Country:     req.Country,
+		DateOfBirth: dob,
+	}
+
+	err := h.uc.UpdateUserProfile(userID, &profile)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "user profile updated successfully"})
+}
+
+func (h *Handler) UpdatePassword(c *gin.Context) {
+	userID, _, _, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		CurrentPassword string `json:"current_password" binding:"required"`
+		NewPassword     string `json:"new_password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.uc.UpdatePassword(userID, req.CurrentPassword, req.NewPassword)
+	if err != nil {
+		if err == settings.ErrInvalidInput {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "incorrect current password"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "password updated successfully"})
+}
+
+func (h *Handler) GetNotificationPreferences(c *gin.Context) {
+	userID, _, _, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	prefs, err := h.uc.GetNotificationPreferences(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"notification_preferences": prefs})
+}
+
+func (h *Handler) UpdateNotificationPreferences(c *gin.Context) {
+	userID, _, _, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		NotificationPreferences []settings.NotificationPreferenceEntry `json:"notification_preferences"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.uc.UpdateNotificationPreferences(userID, req.NotificationPreferences)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "notification preferences updated successfully"})
+}
+
+func (h *Handler) ExportOrgData(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	data, err := h.uc.ExportOrgData(orgID, role)
+	if err != nil {
+		if err == settings.ErrNotAuthorized {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.String(http.StatusOK, data)
+}
+END_FILE:internal/adapters/http/settings/handler.go
 # path: internal/usecase/resources/usecase.go | lang: go | tokens: 3600 | size: 14402
 # functions: NewService
 BEGIN_FILE:internal/usecase/resources/usecase.go
@@ -3738,7 +4301,484 @@ func (h *Handler) Export(c *gin.Context) {
 	})
 }
 END_FILE:internal/adapters/http/resources/handler.go
-# path: internal/app/routes/routes.go | lang: go | tokens: 2739 | size: 10957
+# path: internal/adapters/repository/settings/gorm_repository.go | lang: go | tokens: 3243 | size: 12972
+# functions: NewGormRepository
+BEGIN_FILE:internal/adapters/repository/settings/gorm_repository.go
+package settings
+
+import (
+	"encoding/json"
+	"server/internal/domain/settings"
+	"server/internal/platform/database/models"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) settings.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) GetOrgSettings(orgID uint) (*settings.OrgSettings, error) {
+	var org models.Organisation
+	if err := r.db.First(&org, orgID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, settings.ErrSettingsNotFound
+		}
+		return nil, err
+	}
+
+	return &settings.OrgSettings{
+		ID:                 org.ID,
+		CompanyName:        org.CompanyName,
+		CompanyCode:        org.CompanyCode,
+		PrimaryContactName: org.PrimaryContactName,
+		PrimaryEmail:       org.PrimaryEmail,
+		PhoneNumber:        org.PhoneNumber,
+		OfficeAddress:      org.OfficeAddress,
+		City:               org.City,
+		State:              org.State,
+		PostalCode:         org.PostalCode,
+		Country:            org.Country,
+		CompanyLogo:        nil, // Not implemented or handled as integer ID
+		Industry:           org.Industry,
+		BillingAddress:     org.BillingAddress,
+		CompanySize:        org.CompanySize,
+	}, nil
+}
+
+func (r *gormRepository) UpdateOrgSettings(orgID uint, s *settings.OrgSettings) error {
+	var org models.Organisation
+	if err := r.db.First(&org, orgID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return settings.ErrSettingsNotFound
+		}
+		return err
+	}
+
+	org.CompanyName = s.CompanyName
+	org.OfficeAddress = s.OfficeAddress
+	org.City = s.City
+	org.State = s.State
+	org.PostalCode = s.PostalCode
+	org.Country = s.Country
+	org.Industry = s.Industry
+	org.BillingAddress = s.BillingAddress
+	org.CompanySize = s.CompanySize
+	org.PrimaryContactName = s.PrimaryContactName
+	org.PhoneNumber = s.PhoneNumber
+
+	return r.db.Save(&org).Error
+}
+
+func (r *gormRepository) DeleteOrganisation(orgID uint) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&models.Organisation{}, orgID).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("organisation_id = ?", orgID).Delete(&models.Employee{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("organisation_id = ?", orgID).Delete(&models.Manager{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("organisation_id = ?", orgID).Delete(&models.Boss{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func (r *gormRepository) GetPlanInfo(orgID uint) (*settings.PlanInfo, error) {
+	var org models.Organisation
+	if err := r.db.First(&org, orgID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, settings.ErrSettingsNotFound
+		}
+		return nil, err
+	}
+
+	planName := "Standard Tier"
+	if org.PlanID == 2 {
+		planName = "Enterprise Pro"
+	}
+
+	return &settings.PlanInfo{
+		PlanID:        org.PlanID,
+		PlanName:      planName,
+		PlanStatus:    org.PlanStatus,
+		MaxEmployees:  org.MaxEmployees,
+		PlanStartDate: org.PlanStartDate,
+		PlanEndDate:   org.PlanEndDate,
+	}, nil
+}
+
+func (r *gormRepository) GetRolePermissions(orgID uint) ([]settings.RolePermissionsSet, error) {
+	var list []models.RolePermissions
+	if err := r.db.Where("organisation_id = ?", orgID).Find(&list).Error; err != nil {
+		return nil, err
+	}
+
+	roleMap := make(map[string][]string)
+	// Initialize default roles
+	roleMap["employee"] = []string{}
+	roleMap["manager"] = []string{}
+	roleMap["boss"] = []string{}
+
+	for _, item := range list {
+		roleMap[item.Role] = append(roleMap[item.Role], item.Permission)
+	}
+
+	var result []settings.RolePermissionsSet
+	for _, role := range []string{"employee", "manager", "boss"} {
+		result = append(result, settings.RolePermissionsSet{
+			Role:        role,
+			Permissions: roleMap[role],
+		})
+	}
+
+	return result, nil
+}
+
+func (r *gormRepository) UpdateRolePermissions(orgID uint, perms []settings.RolePermissionsSet) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		for _, rp := range perms {
+			if err := tx.Where("organisation_id = ? AND role = ?", orgID, rp.Role).Delete(&models.RolePermissions{}).Error; err != nil {
+				return err
+			}
+			for _, perm := range rp.Permissions {
+				newPerm := models.RolePermissions{
+					OrganisationID: orgID,
+					Role:           rp.Role,
+					Permission:     perm,
+				}
+				if err := tx.Create(&newPerm).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func (r *gormRepository) GetAttendancePolicy(orgID uint) (*settings.AttendancePolicy, error) {
+	var m models.AttendancePolicy
+	if err := r.db.Where("organisation_id = ?", orgID).First(&m).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return &settings.AttendancePolicy{
+				OrganisationID:  orgID,
+				CheckInTime:     "09:00",
+				CheckOutTime:    "18:00",
+				GracePeriodMins: 15,
+			}, nil
+		}
+		return nil, err
+	}
+
+	return &settings.AttendancePolicy{
+		ID:              m.ID,
+		OrganisationID:  m.OrganisationID,
+		CheckInTime:     m.CheckInTime,
+		CheckOutTime:    m.CheckOutTime,
+		GracePeriodMins: m.GracePeriodMins,
+	}, nil
+}
+
+func (r *gormRepository) UpdateAttendancePolicy(orgID uint, policy *settings.AttendancePolicy) error {
+	var m models.AttendancePolicy
+	err := r.db.Where("organisation_id = ?", orgID).First(&m).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			m = models.AttendancePolicy{
+				OrganisationID:  orgID,
+				CheckInTime:     policy.CheckInTime,
+				CheckOutTime:    policy.CheckOutTime,
+				GracePeriodMins: policy.GracePeriodMins,
+			}
+			return r.db.Create(&m).Error
+		}
+		return err
+	}
+
+	m.CheckInTime = policy.CheckInTime
+	m.CheckOutTime = policy.CheckOutTime
+	m.GracePeriodMins = policy.GracePeriodMins
+	return r.db.Save(&m).Error
+}
+
+func (r *gormRepository) GetLeavePolicies(orgID uint) ([]settings.LeavePolicyEntry, error) {
+	var list []models.LeavePolicy
+	if err := r.db.Where("organisation_id = ?", orgID).Find(&list).Error; err != nil {
+		return nil, err
+	}
+
+	result := make([]settings.LeavePolicyEntry, len(list))
+	for i, m := range list {
+		result[i] = settings.LeavePolicyEntry{
+			ID:             m.ID,
+			OrganisationID: m.OrganisationID,
+			LeaveType:      m.LeaveType,
+			MaxDays:        m.MaxDays,
+			Description:    m.Description,
+		}
+	}
+	return result, nil
+}
+
+func (r *gormRepository) SaveLeavePolicy(orgID uint, policy *settings.LeavePolicyEntry) error {
+	var m models.LeavePolicy
+	if policy.ID != 0 {
+		if err := r.db.Where("id = ? AND organisation_id = ?", policy.ID, orgID).First(&m).Error; err != nil {
+			return err
+		}
+		m.LeaveType = policy.LeaveType
+		m.MaxDays = policy.MaxDays
+		m.Description = policy.Description
+		if err := r.db.Save(&m).Error; err != nil {
+			return err
+		}
+	} else {
+		m = models.LeavePolicy{
+			OrganisationID: orgID,
+			LeaveType:      policy.LeaveType,
+			MaxDays:        policy.MaxDays,
+			Description:    policy.Description,
+		}
+		if err := r.db.Create(&m).Error; err != nil {
+			return err
+		}
+		policy.ID = m.ID
+	}
+	return nil
+}
+
+func (r *gormRepository) DeleteLeavePolicy(orgID uint, policyID uint) error {
+	return r.db.Where("id = ? AND organisation_id = ?", policyID, orgID).Delete(&models.LeavePolicy{}).Error
+}
+
+func (r *gormRepository) UpdateLeavePolicies(orgID uint, policies []settings.LeavePolicyEntry) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		// Get current IDs
+		var current []models.LeavePolicy
+		if err := tx.Where("organisation_id = ?", orgID).Find(&current).Error; err != nil {
+			return err
+		}
+
+		// Create a set of new IDs to keep
+		keepIDs := make(map[uint]bool)
+		for _, p := range policies {
+			if p.ID != 0 {
+				keepIDs[p.ID] = true
+			}
+		}
+
+		// Delete ones not in the list
+		for _, item := range current {
+			if !keepIDs[item.ID] {
+				if err := tx.Delete(&item).Error; err != nil {
+					return err
+				}
+			}
+		}
+
+		// Save/Create new list
+		for _, p := range policies {
+			var m models.LeavePolicy
+			if p.ID != 0 {
+				if err := tx.Where("id = ? AND organisation_id = ?", p.ID, orgID).First(&m).Error; err == nil {
+					m.LeaveType = p.LeaveType
+					m.MaxDays = p.MaxDays
+					m.Description = p.Description
+					if err := tx.Save(&m).Error; err != nil {
+						return err
+					}
+				}
+			} else {
+				m = models.LeavePolicy{
+					OrganisationID: orgID,
+					LeaveType:      p.LeaveType,
+					MaxDays:        p.MaxDays,
+					Description:    p.Description,
+				}
+				if err := tx.Create(&m).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func (r *gormRepository) GetTaskTypes(orgID uint) ([]settings.TaskTypeEntry, error) {
+	var list []models.TaskType
+	if err := r.db.Where("organisation_id = ?", orgID).Find(&list).Error; err != nil {
+		return nil, err
+	}
+
+	result := make([]settings.TaskTypeEntry, len(list))
+	for i, m := range list {
+		result[i] = settings.TaskTypeEntry{
+			ID:             m.ID,
+			OrganisationID: m.OrganisationID,
+			Name:           m.Name,
+			Description:    m.Description,
+		}
+	}
+	return result, nil
+}
+
+func (r *gormRepository) SaveTaskType(orgID uint, taskType *settings.TaskTypeEntry) error {
+	var m models.TaskType
+	if taskType.ID != 0 {
+		if err := r.db.Where("id = ? AND organisation_id = ?", taskType.ID, orgID).First(&m).Error; err != nil {
+			return err
+		}
+		m.Name = taskType.Name
+		m.Description = taskType.Description
+		if err := r.db.Save(&m).Error; err != nil {
+			return err
+		}
+	} else {
+		m = models.TaskType{
+			OrganisationID: orgID,
+			Name:           taskType.Name,
+			Description:    taskType.Description,
+		}
+		if err := r.db.Create(&m).Error; err != nil {
+			return err
+		}
+		taskType.ID = m.ID
+	}
+	return nil
+}
+
+func (r *gormRepository) DeleteTaskType(orgID uint, typeID uint) error {
+	return r.db.Where("id = ? AND organisation_id = ?", typeID, orgID).Delete(&models.TaskType{}).Error
+}
+
+func (r *gormRepository) GetUserProfile(userID uint) (*settings.UserProfile, error) {
+	var m models.UserModel
+	if err := r.db.First(&m, userID).Error; err != nil {
+		return nil, err
+	}
+	return &settings.UserProfile{
+		FirstName:   m.FirstName,
+		LastName:    m.LastName,
+		Email:       m.Email,
+		PhoneNumber: m.PhoneNumber,
+		City:        m.City,
+		Country:     m.Country,
+		DateOfBirth: m.DateOfBirth,
+	}, nil
+}
+
+func (r *gormRepository) UpdateUserProfile(userID uint, profile *settings.UserProfile) error {
+	var m models.UserModel
+	if err := r.db.First(&m, userID).Error; err != nil {
+		return err
+	}
+	m.FirstName = profile.FirstName
+	m.LastName = profile.LastName
+	m.PhoneNumber = profile.PhoneNumber
+	m.City = profile.City
+	m.Country = profile.Country
+	m.DateOfBirth = profile.DateOfBirth
+	return r.db.Save(&m).Error
+}
+
+func (r *gormRepository) UpdatePassword(userID uint, hashedPwd string) error {
+	return r.db.Model(&models.UserModel{}).Where("id = ?", userID).Update("hashed_password", hashedPwd).Error
+}
+
+func (r *gormRepository) GetHashedPassword(userID uint) (string, error) {
+	var m models.UserModel
+	if err := r.db.Select("hashed_password").First(&m, userID).Error; err != nil {
+		return "", err
+	}
+	return m.HashedPassword, nil
+}
+
+func (r *gormRepository) GetNotificationPreferences(userID uint) ([]settings.NotificationPreferenceEntry, error) {
+	var list []models.NotificationPreference
+	if err := r.db.Where("user_id = ?", userID).Find(&list).Error; err != nil {
+		return nil, err
+	}
+
+	categories := []string{"announcements", "tasks", "leaves", "chats"}
+	prefMap := make(map[string]settings.NotificationPreferenceEntry)
+	for _, item := range list {
+		prefMap[item.Category] = settings.NotificationPreferenceEntry{
+			Category: item.Category,
+			Email:    item.Email,
+			Push:     item.Push,
+			InApp:    item.InApp,
+		}
+	}
+
+	var result []settings.NotificationPreferenceEntry
+	for _, cat := range categories {
+		if entry, exists := prefMap[cat]; exists {
+			result = append(result, entry)
+		} else {
+			result = append(result, settings.NotificationPreferenceEntry{
+				Category: cat,
+				Email:    true,
+				Push:     true,
+				InApp:    true,
+			})
+		}
+	}
+	return result, nil
+}
+
+func (r *gormRepository) UpdateNotificationPreferences(userID uint, prefs []settings.NotificationPreferenceEntry) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		for _, p := range prefs {
+			var m models.NotificationPreference
+			err := tx.Where("user_id = ? AND category = ?", userID, p.Category).First(&m).Error
+			if err != nil {
+				if err == gorm.ErrRecordNotFound {
+					m = models.NotificationPreference{
+						UserID:   userID,
+						Category: p.Category,
+						Email:    p.Email,
+						Push:     p.Push,
+						InApp:    p.InApp,
+					}
+					if err := tx.Create(&m).Error; err != nil {
+						return err
+					}
+					continue
+				}
+				return err
+			}
+			m.Email = p.Email
+			m.Push = p.Push
+			m.InApp = p.InApp
+			if err := tx.Save(&m).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (r *gormRepository) ExportOrgData(orgID uint) (string, error) {
+	var org models.Organisation
+	if err := r.db.First(&org, orgID).Error; err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(org)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+END_FILE:internal/adapters/repository/settings/gorm_repository.go
+# path: internal/app/routes/routes.go | lang: go | tokens: 2867 | size: 11470
 # functions: SetupRoutes
 BEGIN_FILE:internal/app/routes/routes.go
 package routes
@@ -3768,6 +4808,7 @@ import (
 	calendarHTTP "server/internal/adapters/http/calendar"
 	researchHTTP "server/internal/adapters/http/research"
 	peopleHTTP "server/internal/adapters/http/people"
+	settingsHTTP "server/internal/adapters/http/settings"
 	analyticsRepo "server/internal/adapters/repository/analytics"
 	attendanceRepo "server/internal/adapters/repository/attendance"
 	authRepo "server/internal/adapters/repository/auth"
@@ -3791,6 +4832,8 @@ import (
 	calendarRepo "server/internal/adapters/repository/calendar"
 	researchRepo "server/internal/adapters/repository/research"
 	peopleRepo "server/internal/adapters/repository/people"
+	settingsRepo "server/internal/adapters/repository/settings"
+	cloudinaryPlatform "server/internal/platform/cloudinary"
 	"server/internal/platform/database"
 	"server/internal/platform/middlewares"
 	mailerPlatform "server/internal/platform/mailer"
@@ -3819,6 +4862,7 @@ import (
 	calendarService "server/internal/usecase/calendar"
 	researchService "server/internal/usecase/research"
 	peopleService "server/internal/usecase/people"
+	settingsService "server/internal/usecase/settings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -3898,7 +4942,7 @@ func SetupRoutes(r *gin.Engine) {
 	projectHandler := projectHTTP.NewHandler(projectUseCase)
 	projectHTTP.RegisterRoutes(r, projectHandler, validateToken)
 
-	fileRepository := fileRepo.NewGormRepository(database.DB)
+	fileRepository := fileRepo.NewGormRepository(database.DB, cloudinaryPlatform.Client)
 	fileUseCase := fileService.NewService(fileRepository)
 	fileHandler := fileHTTP.NewHandler(fileUseCase)
 	fileHTTP.RegisterRoutes(r, fileHandler)
@@ -3954,6 +4998,11 @@ func SetupRoutes(r *gin.Engine) {
 	// Ensure Boss or Manager role for analytics
 	roleMiddleware := middlewares.RoleMiddleware([]string{"boss", "manager"})
 	analyticsHTTP.RegisterRoutes(r, analyticsHandler, validateToken, roleMiddleware)
+
+	settingsRepository := settingsRepo.NewGormRepository(database.DB)
+	settingsUseCase := settingsService.NewUseCase(settingsRepository)
+	settingsHandler := settingsHTTP.NewHandler(settingsUseCase)
+	settingsHTTP.RegisterRoutes(r, settingsHandler, validateToken)
 }
 END_FILE:internal/app/routes/routes.go
 # path: internal/adapters/http/employees/handler.go | lang: go | tokens: 2612 | size: 10448
@@ -9106,6 +10155,171 @@ func (r *GormRepository) GetByID(ctx context.Context, id uint) (*domain.Message,
 	return &res, nil
 }
 END_FILE:internal/adapters/repository/messages/gorm_repository.go
+# path: internal/usecase/settings/usecase.go | lang: go | tokens: 1210 | size: 4843
+# functions: NewUseCase
+BEGIN_FILE:internal/usecase/settings/usecase.go
+package settings
+
+import (
+	"server/internal/domain/settings"
+	"server/internal/platform/miscallenous"
+)
+
+type useCase struct {
+	repo settings.Repository
+}
+
+func NewUseCase(repo settings.Repository) settings.UseCase {
+	return &useCase{repo: repo}
+}
+
+func (u *useCase) GetOrgSettings(orgID uint, userRole string) (*settings.OrgSettings, error) {
+	if userRole != "boss" && userRole != "manager" {
+		return nil, settings.ErrNotAuthorized
+	}
+	return u.repo.GetOrgSettings(orgID)
+}
+
+func (u *useCase) UpdateOrgSettings(orgID uint, userRole string, s *settings.OrgSettings) error {
+	if userRole != "boss" {
+		return settings.ErrNotAuthorized
+	}
+	return u.repo.UpdateOrgSettings(orgID, s)
+}
+
+func (u *useCase) DeleteOrganisation(orgID uint, userRole string, confirmationCode string) error {
+	if userRole != "boss" {
+		return settings.ErrNotAuthorized
+	}
+	org, err := u.repo.GetOrgSettings(orgID)
+	if err != nil {
+		return err
+	}
+	if confirmationCode != org.CompanyCode {
+		return settings.ErrInvalidInput
+	}
+	return u.repo.DeleteOrganisation(orgID)
+}
+
+func (u *useCase) GetPlanInfo(orgID uint, userRole string) (*settings.PlanInfo, error) {
+	if userRole != "boss" && userRole != "manager" {
+		return nil, settings.ErrNotAuthorized
+	}
+	return u.repo.GetPlanInfo(orgID)
+}
+
+func (u *useCase) GetRolePermissions(orgID uint, userRole string) ([]settings.RolePermissionsSet, error) {
+	if userRole != "boss" {
+		return nil, settings.ErrNotAuthorized
+	}
+	return u.repo.GetRolePermissions(orgID)
+}
+
+func (u *useCase) UpdateRolePermissions(orgID uint, userRole string, perms []settings.RolePermissionsSet) error {
+	if userRole != "boss" {
+		return settings.ErrNotAuthorized
+	}
+	return u.repo.UpdateRolePermissions(orgID, perms)
+}
+
+func (u *useCase) GetAttendancePolicy(orgID uint, userRole string) (*settings.AttendancePolicy, error) {
+	if userRole != "boss" && userRole != "manager" {
+		return nil, settings.ErrNotAuthorized
+	}
+	return u.repo.GetAttendancePolicy(orgID)
+}
+
+func (u *useCase) UpdateAttendancePolicy(orgID uint, userRole string, policy *settings.AttendancePolicy) error {
+	if userRole != "boss" {
+		return settings.ErrNotAuthorized
+	}
+	return u.repo.UpdateAttendancePolicy(orgID, policy)
+}
+
+func (u *useCase) GetLeavePolicies(orgID uint, userRole string) ([]settings.LeavePolicyEntry, error) {
+	if userRole != "boss" && userRole != "manager" {
+		return nil, settings.ErrNotAuthorized
+	}
+	return u.repo.GetLeavePolicies(orgID)
+}
+
+func (u *useCase) SaveLeavePolicy(orgID uint, userRole string, policy *settings.LeavePolicyEntry) error {
+	if userRole != "boss" {
+		return settings.ErrNotAuthorized
+	}
+	return u.repo.SaveLeavePolicy(orgID, policy)
+}
+
+func (u *useCase) DeleteLeavePolicy(orgID uint, userRole string, policyID uint) error {
+	if userRole != "boss" {
+		return settings.ErrNotAuthorized
+	}
+	return u.repo.DeleteLeavePolicy(orgID, policyID)
+}
+
+func (u *useCase) UpdateLeavePolicies(orgID uint, userRole string, policies []settings.LeavePolicyEntry) error {
+	if userRole != "boss" {
+		return settings.ErrNotAuthorized
+	}
+	return u.repo.UpdateLeavePolicies(orgID, policies)
+}
+
+func (u *useCase) GetTaskTypes(orgID uint, userRole string) ([]settings.TaskTypeEntry, error) {
+	return u.repo.GetTaskTypes(orgID)
+}
+
+func (u *useCase) SaveTaskType(orgID uint, userRole string, taskType *settings.TaskTypeEntry) error {
+	if userRole != "boss" && userRole != "manager" {
+		return settings.ErrNotAuthorized
+	}
+	return u.repo.SaveTaskType(orgID, taskType)
+}
+
+func (u *useCase) DeleteTaskType(orgID uint, userRole string, typeID uint) error {
+	if userRole != "boss" && userRole != "manager" {
+		return settings.ErrNotAuthorized
+	}
+	return u.repo.DeleteTaskType(orgID, typeID)
+}
+
+func (u *useCase) GetUserProfile(userID uint) (*settings.UserProfile, error) {
+	return u.repo.GetUserProfile(userID)
+}
+
+func (u *useCase) UpdateUserProfile(userID uint, profile *settings.UserProfile) error {
+	return u.repo.UpdateUserProfile(userID, profile)
+}
+
+func (u *useCase) UpdatePassword(userID uint, currentPwd, newPwd string) error {
+	hashed, err := u.repo.GetHashedPassword(userID)
+	if err != nil {
+		return err
+	}
+	if !miscallenous.VerifyPassword(hashed, currentPwd) {
+		return settings.ErrInvalidInput
+	}
+	newHash, err := miscallenous.HashPassword(newPwd)
+	if err != nil {
+		return err
+	}
+	return u.repo.UpdatePassword(userID, newHash)
+}
+
+func (u *useCase) GetNotificationPreferences(userID uint) ([]settings.NotificationPreferenceEntry, error) {
+	return u.repo.GetNotificationPreferences(userID)
+}
+
+func (u *useCase) UpdateNotificationPreferences(userID uint, prefs []settings.NotificationPreferenceEntry) error {
+	return u.repo.UpdateNotificationPreferences(userID, prefs)
+}
+
+func (u *useCase) ExportOrgData(orgID uint, userRole string) (string, error) {
+	if userRole != "boss" {
+		return "", settings.ErrNotAuthorized
+	}
+	return u.repo.ExportOrgData(orgID)
+}
+END_FILE:internal/usecase/settings/usecase.go
 # path: internal/platform/database/models/user_model.go | lang: go | tokens: 1199 | size: 4798
 BEGIN_FILE:internal/platform/database/models/user_model.go
 package models
@@ -11646,6 +12860,124 @@ func (s *service) GetEmployeeAttendanceHistory(ctx context.Context, userID uint,
 	}, nil
 }
 END_FILE:internal/usecase/attendance/usecase.go
+# path: internal/adapters/http/teams/handler.go | lang: go | tokens: 806 | size: 3227
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/teams/handler.go
+package teams
+
+import (
+	"net/http"
+	domain "server/internal/domain/teams"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) CreateTeam(c *gin.Context) {
+	var req struct {
+		Name           string `json:"name"`
+		Description    string `json:"description"`
+		OrganisationID uint   `json:"organisation_id"`
+		CreatedBy      uint   `json:"created_by"`
+		TeamLead       uint   `json:"team_lead"`
+		Members        []uint `json:"members"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid request body", "error": err.Error()})
+		return
+	}
+
+	team := &domain.Team{
+		Name:           req.Name,
+		Description:    req.Description,
+		OrganisationID: req.OrganisationID,
+		CreatedBy:      req.CreatedBy,
+		TeamLead:       req.TeamLead,
+	}
+
+	if err := h.uc.CreateTeam(c.Request.Context(), team, req.Members); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create team", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Team created successfully", "team": team})
+}
+
+func (h *Handler) GetTeam(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+
+	team, members, err := h.uc.GetTeam(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get team", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Team fetched successfully", "team": team, "team_members": members})
+}
+
+func (h *Handler) GetTeamsByOrganisation(c *gin.Context) {
+	orgID, err := strconv.Atoi(c.Param("organisation_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+		return
+	}
+
+	teams, err := h.uc.GetTeamsByOrganisation(c.Request.Context(), uint(orgID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get teams", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Teams fetched successfully", "teams": teams})
+}
+
+func (h *Handler) UpdateTeam(c *gin.Context) {
+	var team domain.Team
+	if err := c.BindJSON(&team); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+	team.ID = uint(id)
+
+	if err := h.uc.UpdateTeam(c.Request.Context(), &team); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update team"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Team updated successfully"})
+}
+
+func (h *Handler) DeleteTeam(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+
+	if err := h.uc.DeleteTeam(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete team"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Team deleted successfully"})
+}
+END_FILE:internal/adapters/http/teams/handler.go
 # path: internal/adapters/http/attendance/handler.go | lang: go | tokens: 806 | size: 3227
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/attendance/handler.go
@@ -11768,124 +13100,6 @@ func (h *Handler) GetEmployeeAttendanceHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, history)
 }
 END_FILE:internal/adapters/http/attendance/handler.go
-# path: internal/adapters/http/teams/handler.go | lang: go | tokens: 806 | size: 3227
-# functions: NewHandler
-BEGIN_FILE:internal/adapters/http/teams/handler.go
-package teams
-
-import (
-	"net/http"
-	domain "server/internal/domain/teams"
-	"strconv"
-
-	"github.com/gin-gonic/gin"
-)
-
-type Handler struct {
-	uc domain.UseCase
-}
-
-func NewHandler(uc domain.UseCase) *Handler {
-	return &Handler{uc: uc}
-}
-
-func (h *Handler) CreateTeam(c *gin.Context) {
-	var req struct {
-		Name           string `json:"name"`
-		Description    string `json:"description"`
-		OrganisationID uint   `json:"organisation_id"`
-		CreatedBy      uint   `json:"created_by"`
-		TeamLead       uint   `json:"team_lead"`
-		Members        []uint `json:"members"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid request body", "error": err.Error()})
-		return
-	}
-
-	team := &domain.Team{
-		Name:           req.Name,
-		Description:    req.Description,
-		OrganisationID: req.OrganisationID,
-		CreatedBy:      req.CreatedBy,
-		TeamLead:       req.TeamLead,
-	}
-
-	if err := h.uc.CreateTeam(c.Request.Context(), team, req.Members); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create team", "message": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Team created successfully", "team": team})
-}
-
-func (h *Handler) GetTeam(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
-		return
-	}
-
-	team, members, err := h.uc.GetTeam(c.Request.Context(), uint(id))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get team", "message": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Team fetched successfully", "team": team, "team_members": members})
-}
-
-func (h *Handler) GetTeamsByOrganisation(c *gin.Context) {
-	orgID, err := strconv.Atoi(c.Param("organisation_id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
-		return
-	}
-
-	teams, err := h.uc.GetTeamsByOrganisation(c.Request.Context(), uint(orgID))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get teams", "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Teams fetched successfully", "teams": teams})
-}
-
-func (h *Handler) UpdateTeam(c *gin.Context) {
-	var team domain.Team
-	if err := c.BindJSON(&team); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
-		return
-	}
-	team.ID = uint(id)
-
-	if err := h.uc.UpdateTeam(c.Request.Context(), &team); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update team"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Team updated successfully"})
-}
-
-func (h *Handler) DeleteTeam(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
-		return
-	}
-
-	if err := h.uc.DeleteTeam(c.Request.Context(), uint(id)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete team"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Team deleted successfully"})
-}
-END_FILE:internal/adapters/http/teams/handler.go
 # path: internal/platform/websocket/hub.go | lang: go | tokens: 757 | size: 3029
 # functions: NewHub
 BEGIN_FILE:internal/platform/websocket/hub.go
@@ -12326,7 +13540,97 @@ type CallState struct {
 	Offer            *string    `gorm:"type:text" json:"offer"`
 }
 END_FILE:internal/platform/database/models/chat_models.go
-# path: internal/platform/database/init.go | lang: go | tokens: 671 | size: 2684
+# path: internal/domain/settings/entity.go | lang: go | tokens: 698 | size: 2793
+BEGIN_FILE:internal/domain/settings/entity.go
+package settings
+
+import (
+	"errors"
+	"time"
+)
+
+var (
+	ErrSettingsNotFound  = errors.New("settings not found")
+	ErrPlanNotFound      = errors.New("subscription plan not found")
+	ErrPolicyNotFound    = errors.New("policy not found")
+	ErrNotAuthorized     = errors.New("not authorized to perform this action")
+	ErrInvalidInput      = errors.New("invalid input data")
+	ErrOrganisationNotFound = errors.New("organisation not found")
+)
+
+type OrgSettings struct {
+	ID                 uint   `json:"id"`
+	CompanyName        string `json:"company_name"`
+	CompanyCode        string `json:"company_code"`
+	PrimaryContactName string `json:"primary_contact_name"`
+	PrimaryEmail       string `json:"primary_email"`
+	PhoneNumber        string `json:"phone_number"`
+	OfficeAddress      string `json:"office_address"`
+	City               string `json:"city"`
+	State              string `json:"state"`
+	PostalCode         string `json:"postal_code"`
+	Country            string `json:"country"`
+	CompanyLogo        *int   `json:"company_logo"`
+	Industry           string `json:"industry"`
+	BillingAddress     string `json:"billing_address"`
+	CompanySize        string `json:"company_size"`
+}
+
+type PlanInfo struct {
+	PlanID        uint      `json:"plan_id"`
+	PlanName      string    `json:"plan_name"`
+	PlanStatus    string    `json:"plan_status"`
+	MaxEmployees  int       `json:"max_employees"`
+	PlanStartDate time.Time `json:"plan_start_date"`
+	PlanEndDate   time.Time `json:"plan_end_date"`
+}
+
+type RolePermissionsSet struct {
+	Role        string   `json:"role"`
+	Permissions []string `json:"permissions"`
+}
+
+type AttendancePolicy struct {
+	ID              uint   `json:"id"`
+	OrganisationID  uint   `json:"organisation_id"`
+	CheckInTime     string `json:"check_in_time"`
+	CheckOutTime    string `json:"check_out_time"`
+	GracePeriodMins int    `json:"grace_period_mins"`
+}
+
+type LeavePolicyEntry struct {
+	ID             uint   `json:"id"`
+	OrganisationID uint   `json:"organisation_id"`
+	LeaveType      string `json:"leave_type"`
+	MaxDays        int    `json:"max_days"`
+	Description    string `json:"description"`
+}
+
+type TaskTypeEntry struct {
+	ID             uint   `json:"id"`
+	OrganisationID uint   `json:"organisation_id"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+}
+
+type UserProfile struct {
+	FirstName   string    `json:"first_name"`
+	LastName    string    `json:"last_name"`
+	Email       string    `json:"email"`
+	PhoneNumber string    `json:"phone_number"`
+	City        string    `json:"city"`
+	Country     string    `json:"country"`
+	DateOfBirth time.Time `json:"date_of_birth"`
+}
+
+type NotificationPreferenceEntry struct {
+	Category string `json:"category"`
+	Email    bool   `json:"email"`
+	Push     bool   `json:"push"`
+	InApp    bool   `json:"in_app"`
+}
+END_FILE:internal/domain/settings/entity.go
+# path: internal/platform/database/init.go | lang: go | tokens: 680 | size: 2720
 # functions: Init, initDB, PerformMigrations
 BEGIN_FILE:internal/platform/database/init.go
 package database
@@ -12421,6 +13725,7 @@ func PerformMigrations() error {
 		&models.PeopleList{},
 		&models.PeopleListContact{},
 		&models.RefreshToken{},
+		&models.NotificationPreference{},
 	)
 	if err != nil {
 		return err
@@ -14628,6 +15933,41 @@ type OwnerEmployeeRow struct {
 	LastLoginAt    time.Time `json:"last_login_at"`
 }
 END_FILE:internal/domain/organisation/entity.go
+# path: internal/domain/settings/usecase.go | lang: go | tokens: 394 | size: 1576
+BEGIN_FILE:internal/domain/settings/usecase.go
+package settings
+
+type UseCase interface {
+	GetOrgSettings(orgID uint, userRole string) (*OrgSettings, error)
+	UpdateOrgSettings(orgID uint, userRole string, settings *OrgSettings) error
+	DeleteOrganisation(orgID uint, userRole string, confirmationCode string) error
+
+	GetPlanInfo(orgID uint, userRole string) (*PlanInfo, error)
+
+	GetRolePermissions(orgID uint, userRole string) ([]RolePermissionsSet, error)
+	UpdateRolePermissions(orgID uint, userRole string, perms []RolePermissionsSet) error
+
+	GetAttendancePolicy(orgID uint, userRole string) (*AttendancePolicy, error)
+	UpdateAttendancePolicy(orgID uint, userRole string, policy *AttendancePolicy) error
+
+	GetLeavePolicies(orgID uint, userRole string) ([]LeavePolicyEntry, error)
+	SaveLeavePolicy(orgID uint, userRole string, policy *LeavePolicyEntry) error
+	DeleteLeavePolicy(orgID uint, userRole string, policyID uint) error
+	UpdateLeavePolicies(orgID uint, userRole string, policies []LeavePolicyEntry) error
+
+	GetTaskTypes(orgID uint, userRole string) ([]TaskTypeEntry, error)
+	SaveTaskType(orgID uint, userRole string, taskType *TaskTypeEntry) error
+	DeleteTaskType(orgID uint, userRole string, typeID uint) error
+
+	GetUserProfile(userID uint) (*UserProfile, error)
+	UpdateUserProfile(userID uint, profile *UserProfile) error
+	UpdatePassword(userID uint, currentPwd, newPwd string) error
+
+	GetNotificationPreferences(userID uint) ([]NotificationPreferenceEntry, error)
+	UpdateNotificationPreferences(userID uint, prefs []NotificationPreferenceEntry) error
+	ExportOrgData(orgID uint, userRole string) (string, error)
+}
+END_FILE:internal/domain/settings/usecase.go
 # path: internal/usecase/teams/usecase.go | lang: go | tokens: 390 | size: 1563
 # functions: NewService
 BEGIN_FILE:internal/usecase/teams/usecase.go
@@ -14768,6 +16108,73 @@ func (h *Handler) GetOrgEmployeeMonitor(c *gin.Context) {
 	c.JSON(http.StatusOK, monitorData)
 }
 END_FILE:internal/adapters/http/analytics/handler.go
+# path: internal/adapters/repository/files/gorm_repository.go | lang: go | tokens: 380 | size: 1523
+# functions: NewGormRepository
+BEGIN_FILE:internal/adapters/repository/files/gorm_repository.go
+package files
+
+import (
+	"bytes"
+	"context"
+	domain "server/internal/domain/files"
+	"server/internal/platform/database/models"
+
+	cld "github.com/cloudinary/cloudinary-go/v2"
+	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db         *gorm.DB
+	cloudinary *cld.Cloudinary
+}
+
+func NewGormRepository(db *gorm.DB, cloudinaryClient *cld.Cloudinary) domain.Repository {
+	return &gormRepository{
+		db:         db,
+		cloudinary: cloudinaryClient,
+	}
+}
+
+func (r *gormRepository) Upload(ctx context.Context, file *domain.File) (string, error) {
+	uploadParams := uploader.UploadParams{
+		PublicID: file.FileName,
+	}
+	uploadResult, err := r.cloudinary.Upload.Upload(ctx, bytes.NewReader(file.Data), uploadParams)
+	if err != nil {
+		return "", err
+	}
+	return uploadResult.SecureURL, nil
+}
+
+func (r *gormRepository) Create(ctx context.Context, file *domain.File) error {
+	model := &models.File{
+		FileName: file.FileName,
+		URL:      file.URL,
+		FileType: file.FileType,
+		FileSize: file.FileSize,
+	}
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	file.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.File, error) {
+	var model models.File
+	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return &domain.File{
+		ID:       model.ID,
+		FileName: model.FileName,
+		URL:      model.URL,
+		FileType: model.FileType,
+		FileSize: model.FileSize,
+	}, nil
+}
+END_FILE:internal/adapters/repository/files/gorm_repository.go
 # path: internal/platform/database/models/team_model.go | lang: go | tokens: 375 | size: 1501
 BEGIN_FILE:internal/platform/database/models/team_model.go
 package models
@@ -14804,74 +16211,50 @@ type TeamMember struct {
 	IsBoss     bool      `gorm:"default:false" json:"is_boss"`
 }
 END_FILE:internal/platform/database/models/team_model.go
-# path: internal/adapters/http/files/handler.go | lang: go | tokens: 365 | size: 1463
-# functions: NewHandler
-BEGIN_FILE:internal/adapters/http/files/handler.go
-package files
+# path: internal/adapters/http/settings/routes.go | lang: go | tokens: 360 | size: 1442
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/settings/routes.go
+package settings
 
 import (
-	"io"
-	"net/http"
-	domain "server/internal/domain/files"
-	"strconv"
-
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct {
-	uc domain.UseCase
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	settingsRoutes := r.Group("/api/v1/settings")
+	settingsRoutes.Use(validateToken)
+	{
+		settingsRoutes.GET("/organisation", h.GetOrgSettings)
+		settingsRoutes.PUT("/organisation", h.UpdateOrgSettings)
+		settingsRoutes.DELETE("/organisation", h.DeleteOrganisation)
+
+		settingsRoutes.GET("/plan", h.GetPlanInfo)
+
+		settingsRoutes.GET("/role-permissions", h.GetRolePermissions)
+		settingsRoutes.PUT("/role-permissions", h.UpdateRolePermissions)
+
+		settingsRoutes.GET("/attendance-policy", h.GetAttendancePolicy)
+		settingsRoutes.PUT("/attendance-policy", h.UpdateAttendancePolicy)
+
+		settingsRoutes.GET("/leave-policy", h.GetLeavePolicies)
+		settingsRoutes.PUT("/leave-policy", h.UpdateLeavePolicies)
+
+		settingsRoutes.GET("/task-types", h.GetTaskTypes)
+		settingsRoutes.POST("/task-types", h.SaveTaskType)
+		settingsRoutes.PUT("/task-types/:id", h.SaveTaskType)
+		settingsRoutes.DELETE("/task-types/:id", h.DeleteTaskType)
+
+		settingsRoutes.GET("/profile", h.GetUserProfile)
+		settingsRoutes.PUT("/profile", h.UpdateUserProfile)
+		settingsRoutes.PUT("/change-password", h.UpdatePassword)
+
+		settingsRoutes.GET("/notification-preferences", h.GetNotificationPreferences)
+		settingsRoutes.PUT("/notification-preferences", h.UpdateNotificationPreferences)
+
+		settingsRoutes.GET("/export", h.ExportOrgData)
+	}
 }
-
-func NewHandler(uc domain.UseCase) *Handler {
-	return &Handler{uc: uc}
-}
-
-func (h *Handler) UploadFile(c *gin.Context) {
-	file, _, err := c.Request.FormFile("data")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	defer file.Close()
-
-	imageData, err := io.ReadAll(file)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	fileDomain := &domain.File{
-		FileName: c.PostForm("file_name"),
-		FileType: c.PostForm("file_type"),
-		FileSize: int64(len(imageData)),
-		Data:     imageData,
-	}
-
-	if err := h.uc.UploadFile(c.Request.Context(), fileDomain); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file", "message": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "file_id": fileDomain.ID})
-}
-
-func (h *Handler) GetFile(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
-		return
-	}
-
-	file, err := h.uc.GetFile(c.Request.Context(), uint(id))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
-		return
-	}
-
-	c.Header("Content-Type", file.FileType)
-	c.Data(http.StatusOK, file.FileType, file.Data)
-}
-END_FILE:internal/adapters/http/files/handler.go
+END_FILE:internal/adapters/http/settings/routes.go
 # path: internal/usecase/notifications/usecase.go | lang: go | tokens: 355 | size: 1421
 # functions: NewService
 BEGIN_FILE:internal/usecase/notifications/usecase.go
@@ -14968,6 +16351,129 @@ type SearchFilters struct {
 	Offset int
 }
 END_FILE:internal/domain/search/entity.go
+# path: internal/adapters/http/files/handler.go | lang: go | tokens: 353 | size: 1413
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/files/handler.go
+package files
+
+import (
+	"io"
+	"net/http"
+	domain "server/internal/domain/files"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) UploadFile(c *gin.Context) {
+	file, _, err := c.Request.FormFile("data")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer file.Close()
+
+	imageData, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	fileDomain := &domain.File{
+		FileName: c.PostForm("file_name"),
+		FileType: c.PostForm("file_type"),
+		FileSize: int64(len(imageData)),
+		Data:     imageData,
+	}
+
+	if err := h.uc.UploadFile(c.Request.Context(), fileDomain); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "file_id": fileDomain.ID})
+}
+
+func (h *Handler) GetFile(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+		return
+	}
+
+	file, err := h.uc.GetFile(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	c.Redirect(http.StatusFound, file.URL)
+}
+END_FILE:internal/adapters/http/files/handler.go
+# path: internal/usecase/settings/usecase_test.go | lang: go | tokens: 352 | size: 1409
+# functions: TestGetOrgSettings_AccessControl
+BEGIN_FILE:internal/usecase/settings/usecase_test.go
+package settings
+
+import (
+	"server/internal/domain/settings"
+	"testing"
+)
+
+type mockRepository struct {
+	settings.Repository
+	getOrgSettingsFunc func(orgID uint) (*settings.OrgSettings, error)
+	updatePasswordFunc func(userID uint, hashed string) error
+	getHashedPwdFunc   func(userID uint) (string, error)
+}
+
+func (m *mockRepository) GetOrgSettings(orgID uint) (*settings.OrgSettings, error) {
+	return m.getOrgSettingsFunc(orgID)
+}
+
+func (m *mockRepository) UpdatePassword(userID uint, hashed string) error {
+	return m.updatePasswordFunc(userID, hashed)
+}
+
+func (m *mockRepository) GetHashedPassword(userID uint) (string, error) {
+	return m.getHashedPwdFunc(userID)
+}
+
+func TestGetOrgSettings_AccessControl(t *testing.T) {
+	repo := &mockRepository{
+		getOrgSettingsFunc: func(orgID uint) (*settings.OrgSettings, error) {
+			return &settings.OrgSettings{CompanyName: "Test"}, nil
+		},
+	}
+	uc := NewUseCase(repo)
+
+	// Boss can view
+	_, err := uc.GetOrgSettings(1, "boss")
+	if err != nil {
+		t.Errorf("boss should be authorized to view org settings: %v", err)
+	}
+
+	// Manager can view
+	_, err = uc.GetOrgSettings(1, "manager")
+	if err != nil {
+		t.Errorf("manager should be authorized to view org settings: %v", err)
+	}
+
+	// Employee cannot view
+	_, err = uc.GetOrgSettings(1, "employee")
+	if err != settings.ErrNotAuthorized {
+		t.Errorf("employee should not be authorized to view org settings: %v", err)
+	}
+}
+END_FILE:internal/usecase/settings/usecase_test.go
 # path: internal/adapters/http/research/routes.go | lang: go | tokens: 345 | size: 1381
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
@@ -15075,40 +16581,6 @@ func (h *Handler) Upgrade(c *gin.Context) {
 	go client.ReadPump()
 }
 END_FILE:internal/adapters/http/notifications/ws_handler.go
-# path: internal/domain/tasks/entity.go | lang: go | tokens: 335 | size: 1340
-BEGIN_FILE:internal/domain/tasks/entity.go
-package tasks
-
-import (
-	authDomain "server/internal/domain/auth"
-	orgDomain "server/internal/domain/organisation"
-	projectDomain "server/internal/domain/projects"
-	teamDomain "server/internal/domain/teams"
-	"time"
-)
-
-type Task struct {
-	ID             uint                   `json:"id"`
-	Title          string                 `json:"title"`
-	Description    string                 `json:"description"`
-	DueDate        time.Time              `json:"due_date"`
-	AssignedTo     uint                   `json:"assigned_to"`
-	AssignedUser   *authDomain.User       `json:"assigned_user"`
-	AssignedBy     uint                   `json:"assigned_by"`
-	AssignedByUser *authDomain.User       `json:"assigned_by_user"`
-	Type           string                 `json:"type"`
-	Priority       string                 `json:"priority"`
-	Status         string                 `json:"status"`
-	OrganisationID uint                   `json:"organisation_id"`
-	Organisation   *orgDomain.Entity      `json:"organisation"`
-	IsPersonal     bool                   `json:"is_personal"`
-	TeamID         *uint                  `json:"team_id"`
-	Team           *teamDomain.Team       `json:"team"`
-	ProjectID      *uint                  `json:"project_id"`
-	Project        *projectDomain.Project `json:"project"`
-	CreatedAt      time.Time              `json:"CreatedAt"`
-}
-END_FILE:internal/domain/tasks/entity.go
 # path: .github/workflows/deploy.yml | lang: yaml | tokens: 335 | size: 1341
 BEGIN_FILE:.github/workflows/deploy.yml
 name: Deploy Backend
@@ -15174,6 +16646,76 @@ jobs:
             docker compose up -d backend
           "
 END_FILE:.github/workflows/deploy.yml
+# path: internal/domain/tasks/entity.go | lang: go | tokens: 335 | size: 1340
+BEGIN_FILE:internal/domain/tasks/entity.go
+package tasks
+
+import (
+	authDomain "server/internal/domain/auth"
+	orgDomain "server/internal/domain/organisation"
+	projectDomain "server/internal/domain/projects"
+	teamDomain "server/internal/domain/teams"
+	"time"
+)
+
+type Task struct {
+	ID             uint                   `json:"id"`
+	Title          string                 `json:"title"`
+	Description    string                 `json:"description"`
+	DueDate        time.Time              `json:"due_date"`
+	AssignedTo     uint                   `json:"assigned_to"`
+	AssignedUser   *authDomain.User       `json:"assigned_user"`
+	AssignedBy     uint                   `json:"assigned_by"`
+	AssignedByUser *authDomain.User       `json:"assigned_by_user"`
+	Type           string                 `json:"type"`
+	Priority       string                 `json:"priority"`
+	Status         string                 `json:"status"`
+	OrganisationID uint                   `json:"organisation_id"`
+	Organisation   *orgDomain.Entity      `json:"organisation"`
+	IsPersonal     bool                   `json:"is_personal"`
+	TeamID         *uint                  `json:"team_id"`
+	Team           *teamDomain.Team       `json:"team"`
+	ProjectID      *uint                  `json:"project_id"`
+	Project        *projectDomain.Project `json:"project"`
+	CreatedAt      time.Time              `json:"CreatedAt"`
+}
+END_FILE:internal/domain/tasks/entity.go
+# path: internal/domain/settings/repository.go | lang: go | tokens: 330 | size: 1321
+BEGIN_FILE:internal/domain/settings/repository.go
+package settings
+
+type Repository interface {
+	GetOrgSettings(orgID uint) (*OrgSettings, error)
+	UpdateOrgSettings(orgID uint, settings *OrgSettings) error
+	DeleteOrganisation(orgID uint) error
+
+	GetPlanInfo(orgID uint) (*PlanInfo, error)
+
+	GetRolePermissions(orgID uint) ([]RolePermissionsSet, error)
+	UpdateRolePermissions(orgID uint, perms []RolePermissionsSet) error
+
+	GetAttendancePolicy(orgID uint) (*AttendancePolicy, error)
+	UpdateAttendancePolicy(orgID uint, policy *AttendancePolicy) error
+
+	GetLeavePolicies(orgID uint) ([]LeavePolicyEntry, error)
+	SaveLeavePolicy(orgID uint, policy *LeavePolicyEntry) error
+	DeleteLeavePolicy(orgID uint, policyID uint) error
+	UpdateLeavePolicies(orgID uint, policies []LeavePolicyEntry) error
+
+	GetTaskTypes(orgID uint) ([]TaskTypeEntry, error)
+	SaveTaskType(orgID uint, taskType *TaskTypeEntry) error
+	DeleteTaskType(orgID uint, typeID uint) error
+
+	GetUserProfile(userID uint) (*UserProfile, error)
+	GetHashedPassword(userID uint) (string, error)
+	UpdateUserProfile(userID uint, profile *UserProfile) error
+	UpdatePassword(userID uint, hashedPwd string) error
+
+	GetNotificationPreferences(userID uint) ([]NotificationPreferenceEntry, error)
+	UpdateNotificationPreferences(userID uint, prefs []NotificationPreferenceEntry) error
+	ExportOrgData(orgID uint) (string, error)
+}
+END_FILE:internal/domain/settings/repository.go
 # path: internal/platform/database/models/task_model.go | lang: go | tokens: 330 | size: 1322
 BEGIN_FILE:internal/platform/database/models/task_model.go
 package models
@@ -15373,6 +16915,39 @@ type ResearchDocumentVersion struct {
 	CreatedBy      uint   `gorm:"not null" json:"created_by"`
 }
 END_FILE:internal/platform/database/models/research_document_model.go
+# path: internal/domain/chats/entity.go | lang: go | tokens: 286 | size: 1144
+# imports: time
+BEGIN_FILE:internal/domain/chats/entity.go
+package chats
+
+import "time"
+
+type Chat struct {
+	ID             uint              `json:"id"`
+	RoomID         string            `json:"room_id"`
+	OrganisationID uint              `json:"organisation_id"`
+	Name           string            `json:"name"`
+	IsGroup        bool              `json:"is_group"`
+	CreatedBy      uint              `json:"created_by"`
+	LastMessage    string            `json:"last_message"`
+	LastMessageAt  *time.Time        `json:"last_message_at"`
+	MessageCount   int               `json:"message_count"`
+	Participants   []ChatParticipant `json:"participants,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+type ChatParticipant struct {
+	ChatID            uint       `json:"chat_id"`
+	UserID            uint       `json:"user_id"`
+	FirstName         string     `json:"first_name"`
+	LastName          string     `json:"last_name"`
+	AvatarURL         string     `json:"avatar_url"`
+	UnreadCount       int        `json:"unread_count"`
+	LastReadMessageID *uint      `json:"last_read_message_id"`
+	JoinedAt          time.Time  `json:"joined_at"`
+}
+END_FILE:internal/domain/chats/entity.go
 # path: internal/adapters/http/onboarding/handler.go | lang: go | tokens: 286 | size: 1145
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/onboarding/handler.go
@@ -15427,39 +17002,6 @@ func (h *Handler) UpdateOnboardingProgress(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "onboarding progress updated"})
 }
 END_FILE:internal/adapters/http/onboarding/handler.go
-# path: internal/domain/chats/entity.go | lang: go | tokens: 286 | size: 1144
-# imports: time
-BEGIN_FILE:internal/domain/chats/entity.go
-package chats
-
-import "time"
-
-type Chat struct {
-	ID             uint              `json:"id"`
-	RoomID         string            `json:"room_id"`
-	OrganisationID uint              `json:"organisation_id"`
-	Name           string            `json:"name"`
-	IsGroup        bool              `json:"is_group"`
-	CreatedBy      uint              `json:"created_by"`
-	LastMessage    string            `json:"last_message"`
-	LastMessageAt  *time.Time        `json:"last_message_at"`
-	MessageCount   int               `json:"message_count"`
-	Participants   []ChatParticipant `json:"participants,omitempty"`
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
-}
-
-type ChatParticipant struct {
-	ChatID            uint       `json:"chat_id"`
-	UserID            uint       `json:"user_id"`
-	FirstName         string     `json:"first_name"`
-	LastName          string     `json:"last_name"`
-	AvatarURL         string     `json:"avatar_url"`
-	UnreadCount       int        `json:"unread_count"`
-	LastReadMessageID *uint      `json:"last_read_message_id"`
-	JoinedAt          time.Time  `json:"joined_at"`
-}
-END_FILE:internal/domain/chats/entity.go
 # path: internal/domain/messages/entity.go | lang: go | tokens: 282 | size: 1130
 # imports: time
 BEGIN_FILE:internal/domain/messages/entity.go
@@ -15870,55 +17412,6 @@ type AttendanceHistory struct {
 	Summary AttendanceSummary `json:"summary"`
 }
 END_FILE:internal/domain/attendance/entity.go
-# path: internal/adapters/repository/files/gorm_repository.go | lang: go | tokens: 241 | size: 967
-# functions: NewGormRepository
-BEGIN_FILE:internal/adapters/repository/files/gorm_repository.go
-package files
-
-import (
-	"context"
-	domain "server/internal/domain/files"
-	"server/internal/platform/database/models"
-
-	"gorm.io/gorm"
-)
-
-type gormRepository struct {
-	db *gorm.DB
-}
-
-func NewGormRepository(db *gorm.DB) domain.Repository {
-	return &gormRepository{db: db}
-}
-
-func (r *gormRepository) Create(ctx context.Context, file *domain.File) error {
-	model := &models.File{
-		FileName: file.FileName,
-		Data:     file.Data,
-		FileType: file.FileType,
-		FileSize: file.FileSize,
-	}
-	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
-		return err
-	}
-	file.ID = model.ID
-	return nil
-}
-
-func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.File, error) {
-	var model models.File
-	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
-		return nil, err
-	}
-	return &domain.File{
-		ID:       model.ID,
-		FileName: model.FileName,
-		Data:     model.Data,
-		FileType: model.FileType,
-		FileSize: model.FileSize,
-	}, nil
-}
-END_FILE:internal/adapters/repository/files/gorm_repository.go
 # path: internal/usecase/organisation/usecase.go | lang: go | tokens: 234 | size: 936
 # functions: NewService
 BEGIN_FILE:internal/usecase/organisation/usecase.go
@@ -15992,40 +17485,6 @@ type Project struct {
 	Milestones       []Milestone  `gorm:"foreignKey:ProjectID" json:"milestones"`
 }
 END_FILE:internal/platform/database/models/project_model.go
-# path: internal/usecase/chats/usecase.go | lang: go | tokens: 231 | size: 925
-# functions: NewService
-BEGIN_FILE:internal/usecase/chats/usecase.go
-package chats
-
-import (
-	"context"
-	domain "server/internal/domain/chats"
-)
-
-type service struct{ repo domain.Repository }
-
-func NewService(repo domain.Repository) domain.UseCase { return &service{repo: repo} }
-
-func (s *service) CreateChat(ctx context.Context, chat *domain.Chat) error {
-	return s.repo.Create(ctx, chat)
-}
-
-func (s *service) GetChats(ctx context.Context, organisationID uint) ([]domain.Chat, error) {
-	return s.repo.ListByOrganisation(ctx, organisationID)
-}
-
-func (s *service) GetUserChats(ctx context.Context, userID uint, orgID uint) ([]domain.Chat, error) {
-	return s.repo.ListByUser(ctx, userID, orgID)
-}
-
-func (s *service) GetOrCreateDM(ctx context.Context, userA uint, userB uint, orgID uint) (*domain.Chat, error) {
-	return s.repo.GetOrCreateDM(ctx, userA, userB, orgID)
-}
-
-func (s *service) GetChatByID(ctx context.Context, chatID uint) (*domain.Chat, error) {
-	return s.repo.GetByID(ctx, chatID)
-}
-END_FILE:internal/usecase/chats/usecase.go
 # path: internal/usecase/calendar/usecase.go | lang: go | tokens: 231 | size: 924
 # functions: NewService
 BEGIN_FILE:internal/usecase/calendar/usecase.go
@@ -16071,6 +17530,40 @@ func (s *service) GetEvents(ctx context.Context, req domain.GetEventsRequest) ([
 	return events, nil
 }
 END_FILE:internal/usecase/calendar/usecase.go
+# path: internal/usecase/chats/usecase.go | lang: go | tokens: 231 | size: 925
+# functions: NewService
+BEGIN_FILE:internal/usecase/chats/usecase.go
+package chats
+
+import (
+	"context"
+	domain "server/internal/domain/chats"
+)
+
+type service struct{ repo domain.Repository }
+
+func NewService(repo domain.Repository) domain.UseCase { return &service{repo: repo} }
+
+func (s *service) CreateChat(ctx context.Context, chat *domain.Chat) error {
+	return s.repo.Create(ctx, chat)
+}
+
+func (s *service) GetChats(ctx context.Context, organisationID uint) ([]domain.Chat, error) {
+	return s.repo.ListByOrganisation(ctx, organisationID)
+}
+
+func (s *service) GetUserChats(ctx context.Context, userID uint, orgID uint) ([]domain.Chat, error) {
+	return s.repo.ListByUser(ctx, userID, orgID)
+}
+
+func (s *service) GetOrCreateDM(ctx context.Context, userA uint, userB uint, orgID uint) (*domain.Chat, error) {
+	return s.repo.GetOrCreateDM(ctx, userA, userB, orgID)
+}
+
+func (s *service) GetChatByID(ctx context.Context, chatID uint) (*domain.Chat, error) {
+	return s.repo.GetByID(ctx, chatID)
+}
+END_FILE:internal/usecase/chats/usecase.go
 # path: internal/platform/database/models/research_reference_model.go | lang: go | tokens: 228 | size: 913
 # imports: gorm.io/gorm
 BEGIN_FILE:internal/platform/database/models/research_reference_model.go
@@ -16118,6 +17611,47 @@ type Repository interface {
 	GetParticipants(ctx context.Context, chatID uint) ([]ChatParticipant, error)
 }
 END_FILE:internal/domain/chats/repository.go
+# path: cmd/server/main.go | lang: go | tokens: 227 | size: 909
+# functions: init, main
+BEGIN_FILE:cmd/server/main.go
+package main
+
+import (
+	"server/internal/app/routes"
+	"server/internal/platform/cloudinary"
+	"server/internal/platform/database"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+)
+
+func init() {
+	godotenv.Load(".env")
+	database.Init()
+	cloudinary.Init()
+}
+
+func main() {
+	// Perform database migrations
+	if err := database.PerformMigrations(); err != nil {
+		panic("Failed to perform database migrations: " + err.Error())
+	}
+	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowOriginFunc: func(origin string) bool {
+			return true
+		},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length", "Authorization"},
+		AllowCredentials: true,
+	}))
+	routes.SetupRoutes(r)
+
+	r.Run(":8000")
+}
+END_FILE:cmd/server/main.go
 # path: internal/domain/auth/usecase.go | lang: go | tokens: 222 | size: 890
 # imports: context
 BEGIN_FILE:internal/domain/auth/usecase.go
@@ -16185,46 +17719,6 @@ type ResearchFolder struct {
 	Files      []ResearchFile     `gorm:"foreignKey:FolderID" json:"files,omitempty"`
 }
 END_FILE:internal/platform/database/models/research_folder_model.go
-# path: cmd/server/main.go | lang: go | tokens: 212 | size: 851
-# functions: init, main
-BEGIN_FILE:cmd/server/main.go
-package main
-
-import (
-	"server/internal/app/routes"
-	"server/internal/platform/database"
-
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
-)
-
-func init() {
-	godotenv.Load(".env")
-	database.Init()
-
-}
-
-func main() {
-	// Perform database migrations
-	if err := database.PerformMigrations(); err != nil {
-		panic("Failed to perform database migrations: " + err.Error())
-	}
-	r := gin.Default()
-	r.Use(cors.New(cors.Config{
-		AllowOriginFunc: func(origin string) bool {
-			return true
-		},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length", "Authorization"},
-		AllowCredentials: true,
-	}))
-	routes.SetupRoutes(r)
-
-	r.Run(":8000")
-}
-END_FILE:cmd/server/main.go
 # path: internal/adapters/http/employees/routes.go | lang: go | tokens: 211 | size: 846
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/employees/routes.go
@@ -16301,27 +17795,6 @@ func (s *service) CreateOffer(ctx context.Context, id uint, callingID, firstName
 }
 func (s *service) EndCall(ctx context.Context, id uint) error { return s.repo.EndCall(ctx, id) }
 END_FILE:internal/usecase/callstate/usecase.go
-# path: internal/domain/projects/repository.go | lang: go | tokens: 182 | size: 730
-# imports: context
-BEGIN_FILE:internal/domain/projects/repository.go
-package projects
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, project *Project) error
-	GetByID(ctx context.Context, id uint) (*Project, error)
-	Update(ctx context.Context, project *Project) error
-	Delete(ctx context.Context, id uint) error
-	GetByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
-	GetByTeam(ctx context.Context, teamID uint) ([]Project, error)
-	GetWithLessData(ctx context.Context, orgID uint) ([]Project, error)
-	CreateMilestone(ctx context.Context, milestone *Milestone) error
-	UpdateMilestone(ctx context.Context, milestone *Milestone) error
-	DeleteMilestone(ctx context.Context, id uint) error
-	GetMilestoneByID(ctx context.Context, id uint) (*Milestone, error)
-}
-END_FILE:internal/domain/projects/repository.go
 # path: internal/domain/employees/repository.go | lang: go | tokens: 182 | size: 731
 # imports: context
 BEGIN_FILE:internal/domain/employees/repository.go
@@ -16345,6 +17818,27 @@ type Repository interface {
 	GetBossByUserID(ctx context.Context, userID uint) (*Boss, error)
 }
 END_FILE:internal/domain/employees/repository.go
+# path: internal/domain/projects/repository.go | lang: go | tokens: 182 | size: 730
+# imports: context
+BEGIN_FILE:internal/domain/projects/repository.go
+package projects
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, project *Project) error
+	GetByID(ctx context.Context, id uint) (*Project, error)
+	Update(ctx context.Context, project *Project) error
+	Delete(ctx context.Context, id uint) error
+	GetByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
+	GetByTeam(ctx context.Context, teamID uint) ([]Project, error)
+	GetWithLessData(ctx context.Context, orgID uint) ([]Project, error)
+	CreateMilestone(ctx context.Context, milestone *Milestone) error
+	UpdateMilestone(ctx context.Context, milestone *Milestone) error
+	DeleteMilestone(ctx context.Context, id uint) error
+	GetMilestoneByID(ctx context.Context, id uint) (*Milestone, error)
+}
+END_FILE:internal/domain/projects/repository.go
 # path: internal/usecase/search/usecase.go | lang: go | tokens: 178 | size: 715
 # functions: NewService
 BEGIN_FILE:internal/usecase/search/usecase.go
@@ -16543,6 +18037,25 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/tasks/routes.go
+# path: internal/platform/database/models/onboarding_progress_model.go | lang: go | tokens: 160 | size: 642
+# imports: time
+BEGIN_FILE:internal/platform/database/models/onboarding_progress_model.go
+package models
+
+import "time"
+
+type OnboardingProgress struct {
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	UserID            uint      `gorm:"index;not null" json:"userId"`
+	OrganisationID    uint      `gorm:"index" json:"organisationId"`
+	ProfileCompleted  bool      `gorm:"default:false" json:"profileCompleted"`
+	TeamJoined         bool      `gorm:"default:false" json:"teamJoined"`
+	TaskCreated       bool      `gorm:"default:false" json:"taskCreated"`
+	InviteSent        bool      `gorm:"default:false" json:"inviteSent"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+END_FILE:internal/platform/database/models/onboarding_progress_model.go
 # path: internal/domain/tasks/repository.go | lang: go | tokens: 160 | size: 641
 # imports: context
 BEGIN_FILE:internal/domain/tasks/repository.go
@@ -16598,25 +18111,6 @@ func (b *Broadcaster) BroadcastNotification(ctx context.Context, n *notification
 	return nil
 }
 END_FILE:internal/platform/websocket/notification_broadcaster.go
-# path: internal/platform/database/models/onboarding_progress_model.go | lang: go | tokens: 160 | size: 642
-# imports: time
-BEGIN_FILE:internal/platform/database/models/onboarding_progress_model.go
-package models
-
-import "time"
-
-type OnboardingProgress struct {
-	ID                uint      `gorm:"primaryKey" json:"id"`
-	UserID            uint      `gorm:"index;not null" json:"userId"`
-	OrganisationID    uint      `gorm:"index" json:"organisationId"`
-	ProfileCompleted  bool      `gorm:"default:false" json:"profileCompleted"`
-	TeamJoined         bool      `gorm:"default:false" json:"teamJoined"`
-	TaskCreated       bool      `gorm:"default:false" json:"taskCreated"`
-	InviteSent        bool      `gorm:"default:false" json:"inviteSent"`
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
-}
-END_FILE:internal/platform/database/models/onboarding_progress_model.go
 # path: internal/adapters/http/calls/handler.go | lang: go | tokens: 155 | size: 621
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/calls/handler.go
@@ -16725,6 +18219,25 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/auth/routes.go
+# path: internal/domain/leave/repository.go | lang: go | tokens: 149 | size: 598
+BEGIN_FILE:internal/domain/leave/repository.go
+package leave
+
+import (
+	"context"
+	"time"
+)
+
+type Repository interface {
+	Create(ctx context.Context, leave *Leave) error
+	GetByID(ctx context.Context, id uint) (*Leave, error)
+	GetByEmployee(ctx context.Context, employeeID uint, offset int) ([]Leave, error)
+	GetByOrganisation(ctx context.Context, orgID uint, status string, offset int) ([]Leave, error)
+	GetHistoryByEmployee(ctx context.Context, employeeID uint, status string, from *time.Time, to *time.Time, limit int, offset int) ([]Leave, error)
+	Update(ctx context.Context, leave *Leave) error
+	Delete(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/leave/repository.go
 # path: internal/platform/database/models/notification_model.go | lang: go | tokens: 149 | size: 599
 # imports: gorm.io/gorm
 BEGIN_FILE:internal/platform/database/models/notification_model.go
@@ -16746,25 +18259,6 @@ type Notification struct {
 	Link             string        `json:"link"`
 }
 END_FILE:internal/platform/database/models/notification_model.go
-# path: internal/domain/leave/repository.go | lang: go | tokens: 149 | size: 598
-BEGIN_FILE:internal/domain/leave/repository.go
-package leave
-
-import (
-	"context"
-	"time"
-)
-
-type Repository interface {
-	Create(ctx context.Context, leave *Leave) error
-	GetByID(ctx context.Context, id uint) (*Leave, error)
-	GetByEmployee(ctx context.Context, employeeID uint, offset int) ([]Leave, error)
-	GetByOrganisation(ctx context.Context, orgID uint, status string, offset int) ([]Leave, error)
-	GetHistoryByEmployee(ctx context.Context, employeeID uint, status string, from *time.Time, to *time.Time, limit int, offset int) ([]Leave, error)
-	Update(ctx context.Context, leave *Leave) error
-	Delete(ctx context.Context, id uint) error
-}
-END_FILE:internal/domain/leave/repository.go
 # path: internal/domain/callstate/entity.go | lang: go | tokens: 148 | size: 592
 # imports: time
 BEGIN_FILE:internal/domain/callstate/entity.go
@@ -16851,6 +18345,37 @@ type Milestone struct {
 	OrganisationID uint      `gorm:"index" json:"organisation_id"`
 }
 END_FILE:internal/platform/database/models/milestone_model.go
+# path: internal/usecase/files/usecase.go | lang: go | tokens: 132 | size: 529
+# functions: NewService
+BEGIN_FILE:internal/usecase/files/usecase.go
+package files
+
+import (
+	"context"
+	domain "server/internal/domain/files"
+)
+
+type service struct {
+	repo domain.Repository
+}
+
+func NewService(repo domain.Repository) domain.UseCase {
+	return &service{repo: repo}
+}
+
+func (s *service) UploadFile(ctx context.Context, file *domain.File) error {
+	url, err := s.repo.Upload(ctx, file)
+	if err != nil {
+		return err
+	}
+	file.URL = url
+	return s.repo.Create(ctx, file)
+}
+
+func (s *service) GetFile(ctx context.Context, id uint) (*domain.File, error) {
+	return s.repo.GetByID(ctx, id)
+}
+END_FILE:internal/usecase/files/usecase.go
 # path: internal/domain/calendar/entity.go | lang: go | tokens: 131 | size: 524
 BEGIN_FILE:internal/domain/calendar/entity.go
 package calendar
@@ -16991,26 +18516,6 @@ type Invite struct {
 	Status         string    `gorm:"size:50;not null;default:'pending'"` // e.g. pending, accepted, expired
 }
 END_FILE:internal/platform/database/models/invite_model.go
-# path: internal/adapters/http/analytics/routes.go | lang: go | tokens: 119 | size: 477
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/analytics/routes.go
-package analytics
-
-import (
-	"github.com/gin-gonic/gin"
-)
-
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc, roleMiddleware gin.HandlerFunc) {
-	analyticsGroup := r.Group("/api/v1/analytics")
-	analyticsGroup.Use(validateToken)
-	// Apply Boss/Manager role check
-	analyticsGroup.Use(roleMiddleware)
-	{
-		analyticsGroup.GET("/employee/:userId", h.GetEmployeeAnalytics)
-		analyticsGroup.GET("/organisation/:orgId/employees", h.GetOrgEmployeeMonitor)
-	}
-}
-END_FILE:internal/adapters/http/analytics/routes.go
 # path: internal/adapters/http/attendance/routes.go | lang: go | tokens: 119 | size: 479
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/attendance/routes.go
@@ -17031,6 +18536,26 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/attendance/routes.go
+# path: internal/adapters/http/analytics/routes.go | lang: go | tokens: 119 | size: 477
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/analytics/routes.go
+package analytics
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc, roleMiddleware gin.HandlerFunc) {
+	analyticsGroup := r.Group("/api/v1/analytics")
+	analyticsGroup.Use(validateToken)
+	// Apply Boss/Manager role check
+	analyticsGroup.Use(roleMiddleware)
+	{
+		analyticsGroup.GET("/employee/:userId", h.GetEmployeeAnalytics)
+		analyticsGroup.GET("/organisation/:orgId/employees", h.GetOrgEmployeeMonitor)
+	}
+}
+END_FILE:internal/adapters/http/analytics/routes.go
 # path: internal/domain/task_attachments/entity.go | lang: go | tokens: 118 | size: 473
 # imports: time
 BEGIN_FILE:internal/domain/task_attachments/entity.go
@@ -17106,48 +18631,6 @@ type UseCase interface {
 	MarkAllNotificationsRead(ctx context.Context, userID uint) error
 }
 END_FILE:internal/domain/notifications/usecase.go
-# path: internal/usecase/files/usecase.go | lang: go | tokens: 110 | size: 442
-# functions: NewService
-BEGIN_FILE:internal/usecase/files/usecase.go
-package files
-
-import (
-	"context"
-	domain "server/internal/domain/files"
-)
-
-type service struct {
-	repo domain.Repository
-}
-
-func NewService(repo domain.Repository) domain.UseCase {
-	return &service{repo: repo}
-}
-
-func (s *service) UploadFile(ctx context.Context, file *domain.File) error {
-	return s.repo.Create(ctx, file)
-}
-
-func (s *service) GetFile(ctx context.Context, id uint) (*domain.File, error) {
-	return s.repo.GetByID(ctx, id)
-}
-END_FILE:internal/usecase/files/usecase.go
-# path: internal/platform/database/models/research_collaborator_model.go | lang: go | tokens: 107 | size: 428
-# imports: gorm.io/gorm
-BEGIN_FILE:internal/platform/database/models/research_collaborator_model.go
-package models
-
-import "gorm.io/gorm"
-
-type ResearchCollaborator struct {
-	gorm.Model
-	ResearchID uint      `gorm:"index;not null" json:"research_id"`
-	UserID     uint      `gorm:"index;not null" json:"user_id"`
-	User       UserModel `gorm:"foreignKey:UserID" json:"user"`
-	Role       string    `gorm:"size:50;not null;default:'viewer'" json:"role"` // owner, editor, commenter, viewer
-	AddedBy    uint      `json:"added_by"`
-}
-END_FILE:internal/platform/database/models/research_collaborator_model.go
 # path: internal/platform/database/models/audit_log_model.go | lang: go | tokens: 107 | size: 431
 BEGIN_FILE:internal/platform/database/models/audit_log_model.go
 package models
@@ -17166,6 +18649,47 @@ type AuditLog struct {
 	Details        string `gorm:"type:text"`
 }
 END_FILE:internal/platform/database/models/audit_log_model.go
+# path: internal/platform/cloudinary/cloudinary.go | lang: go | tokens: 107 | size: 430
+# functions: Init
+BEGIN_FILE:internal/platform/cloudinary/cloudinary.go
+package cloudinary
+
+import (
+	"os"
+
+	cloudinary "github.com/cloudinary/cloudinary-go/v2"
+)
+
+var Client *cloudinary.Cloudinary
+
+func Init() {
+	cloudName := os.Getenv("CLOUD_NAME")
+	apiKey := os.Getenv("CLOUDINARY_API_KEY")
+	apiSecret := os.Getenv("API_SECRET")
+
+	client, err := cloudinary.NewFromParams(cloudName, apiKey, apiSecret)
+	if err != nil {
+		panic("Cloudinary failed to initialize: " + err.Error())
+	}
+	Client = client
+}
+END_FILE:internal/platform/cloudinary/cloudinary.go
+# path: internal/platform/database/models/research_collaborator_model.go | lang: go | tokens: 107 | size: 428
+# imports: gorm.io/gorm
+BEGIN_FILE:internal/platform/database/models/research_collaborator_model.go
+package models
+
+import "gorm.io/gorm"
+
+type ResearchCollaborator struct {
+	gorm.Model
+	ResearchID uint      `gorm:"index;not null" json:"research_id"`
+	UserID     uint      `gorm:"index;not null" json:"user_id"`
+	User       UserModel `gorm:"foreignKey:UserID" json:"user"`
+	Role       string    `gorm:"size:50;not null;default:'viewer'" json:"role"` // owner, editor, commenter, viewer
+	AddedBy    uint      `json:"added_by"`
+}
+END_FILE:internal/platform/database/models/research_collaborator_model.go
 # path: internal/adapters/http/organisation/routes.go | lang: go | tokens: 105 | size: 420
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/organisation/routes.go
@@ -17185,22 +18709,23 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/organisation/routes.go
-# path: internal/domain/teams/usecase.go | lang: go | tokens: 103 | size: 414
-# imports: context
-BEGIN_FILE:internal/domain/teams/usecase.go
-package teams
+# path: internal/platform/database/models/notification_preference_model.go | lang: go | tokens: 104 | size: 418
+BEGIN_FILE:internal/platform/database/models/notification_preference_model.go
+package models
 
-import "context"
+import (
+	"gorm.io/gorm"
+)
 
-type UseCase interface {
-	CreateTeam(ctx context.Context, team *Team, members []uint) error
-	GetTeam(ctx context.Context, id uint) (*Team, []TeamMember, error)
-	UpdateTeam(ctx context.Context, team *Team) error
-	DeleteTeam(ctx context.Context, id uint) error
-	GetTeamsByOrganisation(ctx context.Context, orgID uint) ([]Team, error)
-	GetTeams(ctx context.Context) ([]Team, error)
+type NotificationPreference struct {
+	gorm.Model
+	UserID   uint   `gorm:"index;not null" json:"user_id"`
+	Category string `gorm:"size:50;not null" json:"category"` // e.g. "announcements", "tasks", "leaves", "chats"
+	Email    bool   `gorm:"default:true" json:"email"`
+	Push     bool   `gorm:"default:true" json:"push"`
+	InApp    bool   `gorm:"default:true" json:"in_app"`
 }
-END_FILE:internal/domain/teams/usecase.go
+END_FILE:internal/platform/database/models/notification_preference_model.go
 # path: internal/platform/database/models/task_attachment_model.go | lang: go | tokens: 103 | size: 415
 BEGIN_FILE:internal/platform/database/models/task_attachment_model.go
 package models
@@ -17220,6 +18745,22 @@ type TaskAttachment struct {
 	UploadedByUser UserModel `gorm:"foreignKey:UploadedBy"`
 }
 END_FILE:internal/platform/database/models/task_attachment_model.go
+# path: internal/domain/teams/usecase.go | lang: go | tokens: 103 | size: 414
+# imports: context
+BEGIN_FILE:internal/domain/teams/usecase.go
+package teams
+
+import "context"
+
+type UseCase interface {
+	CreateTeam(ctx context.Context, team *Team, members []uint) error
+	GetTeam(ctx context.Context, id uint) (*Team, []TeamMember, error)
+	UpdateTeam(ctx context.Context, team *Team) error
+	DeleteTeam(ctx context.Context, id uint) error
+	GetTeamsByOrganisation(ctx context.Context, orgID uint) ([]Team, error)
+	GetTeams(ctx context.Context) ([]Team, error)
+}
+END_FILE:internal/domain/teams/usecase.go
 # path: internal/domain/chats/usecase.go | lang: go | tokens: 101 | size: 404
 # imports: context
 BEGIN_FILE:internal/domain/chats/usecase.go
@@ -17333,6 +18874,21 @@ type UseCase interface {
 	RemoveAttachment(ctx context.Context, attachmentID uint, requestingUserID uint) error
 }
 END_FILE:internal/domain/task_attachments/usecase.go
+# path: internal/domain/invites/usecase.go | lang: go | tokens: 86 | size: 347
+BEGIN_FILE:internal/domain/invites/usecase.go
+package invites
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+)
+
+type UseCase interface {
+	InviteEmployee(ctx context.Context, invite *EmployeeInvite) error
+	AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error)
+	GetInvitesByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
+}
+END_FILE:internal/domain/invites/usecase.go
 # path: internal/adapters/http/callstate/routes.go | lang: go | tokens: 86 | size: 344
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
@@ -17353,21 +18909,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/callstate/routes.go
-# path: internal/domain/invites/usecase.go | lang: go | tokens: 86 | size: 347
-BEGIN_FILE:internal/domain/invites/usecase.go
-package invites
-
-import (
-	"context"
-	authDomain "server/internal/domain/auth"
-)
-
-type UseCase interface {
-	InviteEmployee(ctx context.Context, invite *EmployeeInvite) error
-	AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error)
-	GetInvitesByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
-}
-END_FILE:internal/domain/invites/usecase.go
 # path: internal/adapters/http/messages/routes.go | lang: go | tokens: 85 | size: 340
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
@@ -17429,35 +18970,6 @@ type OnboardingProgress struct {
 	InviteSent       bool `json:"inviteSent"`
 }
 END_FILE:internal/domain/onboarding/entity.go
-# path: internal/platform/database/models/work_schedule_model.go | lang: go | tokens: 79 | size: 319
-BEGIN_FILE:internal/platform/database/models/work_schedule_model.go
-package models
-
-import (
-	"gorm.io/gorm"
-)
-
-type WorkSchedule struct {
-	gorm.Model
-	OrganisationID uint   `gorm:"index;not null"`
-	Name           string `gorm:"size:100;not null"` // e.g. "Standard Week", "Flexible Shift"
-	ScheduleData   string `gorm:"type:text"`         // JSON or text describing work hours per day
-}
-END_FILE:internal/platform/database/models/work_schedule_model.go
-# path: internal/adapters/http/invites/routes.go | lang: go | tokens: 79 | size: 317
-# imports: github.com/gin-gonic/gin
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/invites/routes.go
-package invites
-
-import "github.com/gin-gonic/gin"
-
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	r.POST("/api/v1/employees/invite", validateToken, h.InviteEmployee)
-	r.POST("/api/v1/invites/accept", h.AcceptInvite) // public
-	r.GET("/api/v1/invites", validateToken, h.GetInvites)
-}
-END_FILE:internal/adapters/http/invites/routes.go
 # path: internal/adapters/http/onboarding/routes.go | lang: go | tokens: 79 | size: 316
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/onboarding/routes.go
@@ -17490,6 +19002,52 @@ type Repository interface {
 	EndCall(ctx context.Context, id uint) error
 }
 END_FILE:internal/domain/callstate/repository.go
+# path: internal/adapters/http/invites/routes.go | lang: go | tokens: 79 | size: 317
+# imports: github.com/gin-gonic/gin
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/invites/routes.go
+package invites
+
+import "github.com/gin-gonic/gin"
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	r.POST("/api/v1/employees/invite", validateToken, h.InviteEmployee)
+	r.POST("/api/v1/invites/accept", h.AcceptInvite) // public
+	r.GET("/api/v1/invites", validateToken, h.GetInvites)
+}
+END_FILE:internal/adapters/http/invites/routes.go
+# path: internal/platform/database/models/work_schedule_model.go | lang: go | tokens: 79 | size: 319
+BEGIN_FILE:internal/platform/database/models/work_schedule_model.go
+package models
+
+import (
+	"gorm.io/gorm"
+)
+
+type WorkSchedule struct {
+	gorm.Model
+	OrganisationID uint   `gorm:"index;not null"`
+	Name           string `gorm:"size:100;not null"` // e.g. "Standard Week", "Flexible Shift"
+	ScheduleData   string `gorm:"type:text"`         // JSON or text describing work hours per day
+}
+END_FILE:internal/platform/database/models/work_schedule_model.go
+# path: internal/platform/database/models/task_comment_model.go | lang: go | tokens: 78 | size: 313
+BEGIN_FILE:internal/platform/database/models/task_comment_model.go
+package models
+
+import (
+	"time"
+)
+
+type TaskComment struct {
+	ID        uint      `gorm:"primaryKey"`
+	TaskID    uint      `gorm:"index;not null"`
+	UserID    uint      `gorm:"index;not null"`
+	Content   string    `gorm:"type:text;not null"`
+	CreatedAt time.Time
+	User      UserModel `gorm:"foreignKey:UserID"`
+}
+END_FILE:internal/platform/database/models/task_comment_model.go
 # path: internal/platform/database/models/role_permissions_model.go | lang: go | tokens: 78 | size: 312
 BEGIN_FILE:internal/platform/database/models/role_permissions_model.go
 package models
@@ -17519,23 +19077,6 @@ type UseCase interface {
 	EndCall(ctx context.Context, id uint) error
 }
 END_FILE:internal/domain/callstate/usecase.go
-# path: internal/platform/database/models/task_comment_model.go | lang: go | tokens: 78 | size: 313
-BEGIN_FILE:internal/platform/database/models/task_comment_model.go
-package models
-
-import (
-	"time"
-)
-
-type TaskComment struct {
-	ID        uint      `gorm:"primaryKey"`
-	TaskID    uint      `gorm:"index;not null"`
-	UserID    uint      `gorm:"index;not null"`
-	Content   string    `gorm:"type:text;not null"`
-	CreatedAt time.Time
-	User      UserModel `gorm:"foreignKey:UserID"`
-}
-END_FILE:internal/platform/database/models/task_comment_model.go
 # path: internal/domain/task_comments/usecase.go | lang: go | tokens: 77 | size: 311
 BEGIN_FILE:internal/domain/task_comments/usecase.go
 package task_comments
@@ -17582,7 +19123,7 @@ type AttendancePolicy struct {
 	GracePeriodMins int   `gorm:"default:15"`
 }
 END_FILE:internal/platform/database/models/attendance_policy_model.go
-# path: internal/platform/database/models/file_model.go | lang: go | tokens: 74 | size: 297
+# path: internal/platform/database/models/file_model.go | lang: go | tokens: 73 | size: 295
 # imports: gorm.io/gorm
 BEGIN_FILE:internal/platform/database/models/file_model.go
 package models
@@ -17592,7 +19133,7 @@ import "gorm.io/gorm"
 type File struct {
 	gorm.Model
 	FileName string `gorm:"not null" json:"file_name"`
-	Data     []byte `gorm:"type:bytea;not null" json:"data"`
+	URL      string `gorm:"type:text;not null" json:"url"`
 	FileType string `gorm:"not null" json:"file_type"`
 	FileSize int64  `gorm:"not null" json:"file_size"`
 }
@@ -17720,6 +19261,19 @@ type Message struct {
 	Candidate interface{} `json:"candidate,omitempty"`
 }
 END_FILE:internal/platform/database/models/message.go
+# path: internal/domain/files/entity.go | lang: go | tokens: 57 | size: 231
+BEGIN_FILE:internal/domain/files/entity.go
+package files
+
+type File struct {
+	ID       uint   `json:"id"`
+	FileName string `json:"file_name"`
+	Data     []byte `json:"-"`
+	URL      string `json:"url"`
+	FileType string `json:"file_type"`
+	FileSize int64  `json:"file_size"`
+}
+END_FILE:internal/domain/files/entity.go
 # path: internal/adapters/http/files/routes.go | lang: go | tokens: 56 | size: 227
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/files/routes.go
@@ -17737,6 +19291,19 @@ func RegisterRoutes(r *gin.Engine, h *Handler) {
 	}
 }
 END_FILE:internal/adapters/http/files/routes.go
+# path: internal/domain/files/repository.go | lang: go | tokens: 55 | size: 221
+# imports: context
+BEGIN_FILE:internal/domain/files/repository.go
+package files
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, file *File) error
+	GetByID(ctx context.Context, id uint) (*File, error)
+	Upload(ctx context.Context, file *File) (string, error)
+}
+END_FILE:internal/domain/files/repository.go
 # path: internal/platform/database/models/task_type_model.go | lang: go | tokens: 54 | size: 219
 BEGIN_FILE:internal/platform/database/models/task_type_model.go
 package models
@@ -17778,18 +19345,6 @@ type Repository interface {
 	GetCalendarEvents(ctx context.Context, orgID uint, userID *uint, startDate time.Time, endDate time.Time) ([]CalendarEvent, error)
 }
 END_FILE:internal/domain/calendar/repository.go
-# path: internal/domain/files/entity.go | lang: go | tokens: 50 | size: 201
-BEGIN_FILE:internal/domain/files/entity.go
-package files
-
-type File struct {
-	ID       uint   `json:"id"`
-	FileName string `json:"file_name"`
-	Data     []byte `json:"-"`
-	FileType string `json:"file_type"`
-	FileSize int64  `json:"file_size"`
-}
-END_FILE:internal/domain/files/entity.go
 # path: internal/domain/search/repository.go | lang: go | tokens: 49 | size: 199
 # imports: context
 BEGIN_FILE:internal/domain/search/repository.go
@@ -17814,18 +19369,6 @@ type UseCase interface {
 	Search(ctx context.Context, filters *SearchFilters) (*SearchResults, error)
 }
 END_FILE:internal/domain/search/usecase.go
-# path: internal/domain/files/repository.go | lang: go | tokens: 41 | size: 164
-# imports: context
-BEGIN_FILE:internal/domain/files/repository.go
-package files
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, file *File) error
-	GetByID(ctx context.Context, id uint) (*File, error)
-}
-END_FILE:internal/domain/files/repository.go
 # path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
 # imports: context
 BEGIN_FILE:internal/domain/files/usecase.go
@@ -17882,30 +19425,6 @@ package websocket
 // PresenceTracker can be used for future extension of presence logic
 type PresenceTracker struct{}
 END_FILE:internal/platform/websocket/presence_tracker.go
-# path: internal/adapters/repository/settings/gorm_repository.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/adapters/repository/settings/gorm_repository.go
-package settings
-END_FILE:internal/adapters/repository/settings/gorm_repository.go
-# path: internal/adapters/http/settings/routes.go | lang: go | tokens: 4 | size: 17
-BEGIN_FILE:internal/adapters/http/settings/routes.go
-package settings
-END_FILE:internal/adapters/http/settings/routes.go
-# path: internal/domain/settings/entity.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/domain/settings/entity.go
-package settings
-END_FILE:internal/domain/settings/entity.go
-# path: internal/usecase/settings/usecase.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/usecase/settings/usecase.go
-package settings
-END_FILE:internal/usecase/settings/usecase.go
-# path: internal/domain/settings/usecase.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/domain/settings/usecase.go
-package settings
-END_FILE:internal/domain/settings/usecase.go
-# path: internal/domain/analytics/repository.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/domain/analytics/repository.go
-package analytics
-END_FILE:internal/domain/analytics/repository.go
 # path: internal/usecase/milestones/usecase.go | lang: go | tokens: 4 | size: 18
 BEGIN_FILE:internal/usecase/milestones/usecase.go
 package milestones
@@ -17918,54 +19437,42 @@ END_FILE:internal/domain/analytics/usecase.go
 BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
 package milestones
 END_FILE:internal/adapters/repository/milestones/gorm_repository.go
-# path: internal/domain/settings/repository.go | lang: go | tokens: 4 | size: 16
-BEGIN_FILE:internal/domain/settings/repository.go
-package settings
-END_FILE:internal/domain/settings/repository.go
-# path: internal/adapters/http/settings/handler.go | lang: go | tokens: 4 | size: 17
-BEGIN_FILE:internal/adapters/http/settings/handler.go
-package settings
-END_FILE:internal/adapters/http/settings/handler.go
-# path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/http/milestones/handler.go
-package milestone
-END_FILE:internal/adapters/http/milestones/handler.go
 # path: internal/adapters/http/milestones/routes.go | lang: go | tokens: 4 | size: 18
 BEGIN_FILE:internal/adapters/http/milestones/routes.go
 package milestone
 END_FILE:internal/adapters/http/milestones/routes.go
-# path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/audit/usecase.go
-package audit
-END_FILE:internal/domain/audit/usecase.go
-# path: internal/domain/milestones/usecase.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/usecase.go
-package entity
-END_FILE:internal/domain/milestones/usecase.go
-# path: internal/adapters/repository/audit/gorm_repository.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/adapters/repository/audit/gorm_repository.go
-package audit
-END_FILE:internal/adapters/repository/audit/gorm_repository.go
-# path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/domain/audit/repository.go
-package audit
-END_FILE:internal/domain/audit/repository.go
-# path: internal/domain/milestones/repository.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/repository.go
-package entity
-END_FILE:internal/domain/milestones/repository.go
+# path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/milestones/handler.go
+package milestone
+END_FILE:internal/adapters/http/milestones/handler.go
+# path: internal/domain/analytics/repository.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/domain/analytics/repository.go
+package analytics
+END_FILE:internal/domain/analytics/repository.go
 # path: internal/adapters/http/audit/routes.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/adapters/http/audit/routes.go
 package audit
 END_FILE:internal/adapters/http/audit/routes.go
-# path: internal/adapters/http/audit/handler.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/adapters/http/audit/handler.go
-package audit
-END_FILE:internal/adapters/http/audit/handler.go
+# path: internal/domain/milestones/repository.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/repository.go
+package entity
+END_FILE:internal/domain/milestones/repository.go
+# path: internal/domain/milestones/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/usecase.go
+package entity
+END_FILE:internal/domain/milestones/usecase.go
 # path: internal/domain/milestones/entity.go | lang: go | tokens: 3 | size: 14
 BEGIN_FILE:internal/domain/milestones/entity.go
 package entity
 END_FILE:internal/domain/milestones/entity.go
+# path: internal/adapters/http/audit/handler.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/adapters/http/audit/handler.go
+package audit
+END_FILE:internal/adapters/http/audit/handler.go
+# path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/audit/usecase.go
+package audit
+END_FILE:internal/domain/audit/usecase.go
 # path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/domain/audit/entity.go
 package audit
@@ -17974,4 +19481,12 @@ END_FILE:internal/domain/audit/entity.go
 BEGIN_FILE:internal/usecase/audit/usecase.go
 package audit
 END_FILE:internal/usecase/audit/usecase.go
-# included: 237 / 237 | total tokens: 128341
+# path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/repository.go
+package audit
+END_FILE:internal/domain/audit/repository.go
+# path: internal/adapters/repository/audit/gorm_repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/adapters/repository/audit/gorm_repository.go
+package audit
+END_FILE:internal/adapters/repository/audit/gorm_repository.go
+# included: 240 / 240 | total tokens: 139059

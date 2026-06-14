@@ -50,6 +50,7 @@ import (
 	researchRepo "server/internal/adapters/repository/research"
 	peopleRepo "server/internal/adapters/repository/people"
 	settingsRepo "server/internal/adapters/repository/settings"
+	cloudinaryPlatform "server/internal/platform/cloudinary"
 	"server/internal/platform/database"
 	"server/internal/platform/middlewares"
 	mailerPlatform "server/internal/platform/mailer"
@@ -158,7 +159,7 @@ func SetupRoutes(r *gin.Engine) {
 	projectHandler := projectHTTP.NewHandler(projectUseCase)
 	projectHTTP.RegisterRoutes(r, projectHandler, validateToken)
 
-	fileRepository := fileRepo.NewGormRepository(database.DB)
+	fileRepository := fileRepo.NewGormRepository(database.DB, cloudinaryPlatform.Client)
 	fileUseCase := fileService.NewService(fileRepository)
 	fileHandler := fileHTTP.NewHandler(fileUseCase)
 	fileHTTP.RegisterRoutes(r, fileHandler)

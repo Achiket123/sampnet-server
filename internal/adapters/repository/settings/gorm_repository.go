@@ -366,6 +366,7 @@ func (r *gormRepository) GetUserProfile(userID uint) (*settings.UserProfile, err
 		City:        m.City,
 		Country:     m.Country,
 		DateOfBirth: m.DateOfBirth,
+		ProfilePic:  m.ProfilePic,
 	}, nil
 }
 
@@ -380,6 +381,7 @@ func (r *gormRepository) UpdateUserProfile(userID uint, profile *settings.UserPr
 	m.City = profile.City
 	m.Country = profile.Country
 	m.DateOfBirth = profile.DateOfBirth
+	m.ProfilePic = profile.ProfilePic
 	return r.db.Save(&m).Error
 }
 

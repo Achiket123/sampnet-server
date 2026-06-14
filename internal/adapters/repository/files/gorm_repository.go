@@ -1,25 +1,43 @@
 package files
 
 import (
+	"bytes"
 	"context"
 	domain "server/internal/domain/files"
 	"server/internal/platform/database/models"
 
+	cld "github.com/cloudinary/cloudinary-go/v2"
+	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
 	"gorm.io/gorm"
 )
 
 type gormRepository struct {
-	db *gorm.DB
+	db         *gorm.DB
+	cloudinary *cld.Cloudinary
 }
 
-func NewGormRepository(db *gorm.DB) domain.Repository {
-	return &gormRepository{db: db}
+func NewGormRepository(db *gorm.DB, cloudinaryClient *cld.Cloudinary) domain.Repository {
+	return &gormRepository{
+		db:         db,
+		cloudinary: cloudinaryClient,
+	}
+}
+
+func (r *gormRepository) Upload(ctx context.Context, file *domain.File) (string, error) {
+	uploadParams := uploader.UploadParams{
+		PublicID: file.FileName,
+	}
+	uploadResult, err := r.cloudinary.Upload.Upload(ctx, bytes.NewReader(file.Data), uploadParams)
+	if err != nil {
+		return "", err
+	}
+	return uploadResult.SecureURL, nil
 }
 
 func (r *gormRepository) Create(ctx context.Context, file *domain.File) error {
 	model := &models.File{
 		FileName: file.FileName,
-		Data:     file.Data,
+		URL:      file.URL,
 		FileType: file.FileType,
 		FileSize: file.FileSize,
 	}
@@ -38,7 +56,7 @@ func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.File, er
 	return &domain.File{
 		ID:       model.ID,
 		FileName: model.FileName,
-		Data:     model.Data,
+		URL:      model.URL,
 		FileType: model.FileType,
 		FileSize: model.FileSize,
 	}, nil

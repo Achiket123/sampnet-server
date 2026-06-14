@@ -431,6 +431,7 @@ func (h *Handler) UpdateUserProfile(c *gin.Context) {
 		City        string `json:"city"`
 		Country     string `json:"country"`
 		DateOfBirth string `json:"date_of_birth"`
+		ProfilePic  string `json:"profile_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -458,6 +459,7 @@ func (h *Handler) UpdateUserProfile(c *gin.Context) {
 		City:        req.City,
 		Country:     req.Country,
 		DateOfBirth: dob,
+		ProfilePic:  req.ProfilePic,
 	}
 
 	err := h.uc.UpdateUserProfile(userID, &profile)

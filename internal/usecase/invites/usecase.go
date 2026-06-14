@@ -147,10 +147,16 @@ func (s *service) AcceptInvite(ctx context.Context, token string, password strin
 
 	// 6. Generate token pair
 	userModel := models.UserModel{
-		FirstName:  user.FirstName,
-		LastName:   user.LastName,
-		Email:      user.Email,
-		IsVerified: user.IsVerified,
+		FirstName:   user.FirstName,
+		LastName:    user.LastName,
+		Email:       user.Email,
+		PhoneNumber: user.PhoneNumber,
+		IsVerified:  user.IsVerified,
+		ProfilePic:  user.ProfilePic,
+		City:        user.City,
+		Country:     user.Country,
+		DateOfBirth: user.DateOfBirth,
+		LastLoginAt: user.LastLoginAt,
 	}
 	userModel.ID = user.ID
 

@@ -14,6 +14,11 @@ func NewService(repo domain.Repository) domain.UseCase {
 }
 
 func (s *service) UploadFile(ctx context.Context, file *domain.File) error {
+	url, err := s.repo.Upload(ctx, file)
+	if err != nil {
+		return err
+	}
+	file.URL = url
 	return s.repo.Create(ctx, file)
 }
 

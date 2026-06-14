@@ -117,13 +117,7 @@ func (s *service) ValidateEmployee(ctx context.Context, userID uint) (string, er
 		return "", ErrNotAnEmployee
 	}
 
-	empModel := models.Employee{
-		UserID:         employee.UserID,
-		OrganisationID: employee.OrganisationID,
-		Type:           employee.Type,
-	}
-
-	token, err := miscallenous.GenerateJWTToken(empModel, "employee", employee.UserID)
+	token, err := miscallenous.GenerateJWTToken(employee, "employee", employee.UserID)
 	if err != nil {
 		return "", err
 	}
@@ -170,10 +164,16 @@ func (s *service) Logout(ctx context.Context, rawRefreshToken string) error {
 // issueTokenPair generates a new access + refresh token pair and persists the refresh token.
 func (s *service) issueTokenPair(ctx context.Context, user *domain.User) (domain.TokenPair, error) {
 	userModel := models.UserModel{
-		FirstName:  user.FirstName,
-		LastName:   user.LastName,
-		Email:      user.Email,
-		IsVerified: user.IsVerified,
+		FirstName:   user.FirstName,
+		LastName:    user.LastName,
+		Email:       user.Email,
+		PhoneNumber: user.PhoneNumber,
+		IsVerified:  user.IsVerified,
+		ProfilePic:  user.ProfilePic,
+		City:        user.City,
+		Country:     user.Country,
+		DateOfBirth: user.DateOfBirth,
+		LastLoginAt: user.LastLoginAt,
 	}
 	userModel.ID = user.ID
 

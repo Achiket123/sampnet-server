@@ -77,6 +77,7 @@ type UserProfile struct {
 	City        string    `json:"city"`
 	Country     string    `json:"country"`
 	DateOfBirth time.Time `json:"date_of_birth"`
+	ProfilePic  string    `json:"profile_id"`
 }
 
 type NotificationPreferenceEntry struct {

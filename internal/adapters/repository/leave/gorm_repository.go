@@ -2,6 +2,7 @@ package leave
 
 import (
 	"context"
+	"fmt"
 	"server/internal/domain/leave"
 	"server/internal/platform/database/models"
 	"time"
@@ -18,6 +19,39 @@ func NewGormRepository(db *gorm.DB) leave.Repository {
 }
 
 func (r *gormRepository) Create(ctx context.Context, l *leave.Leave) error {
+	// 1. Verify/link LeaveType to LeavePolicy
+	var count int64
+	if err := r.db.WithContext(ctx).Model(&models.LeavePolicy{}).Where("organisation_id = ?", l.OrganisationID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		// Seed default leave policies for this organisation on the fly
+		defaultLeavePolicies := []models.LeavePolicy{
+			{OrganisationID: l.OrganisationID, LeaveType: "annual", MaxDays: 20, Description: "Standard annual vacation allowance"},
+			{OrganisationID: l.OrganisationID, LeaveType: "sick", MaxDays: 10, Description: "Sick leave for medical recovery"},
+			{OrganisationID: l.OrganisationID, LeaveType: "unpaid", MaxDays: 30, Description: "Unpaid time off"},
+			{OrganisationID: l.OrganisationID, LeaveType: "maternity", MaxDays: 90, Description: "Maternity leave for new mothers"},
+			{OrganisationID: l.OrganisationID, LeaveType: "paternity", MaxDays: 15, Description: "Paternity leave for new fathers"},
+			{OrganisationID: l.OrganisationID, LeaveType: "emergency", MaxDays: 5, Description: "Emergency or compassionate leave"},
+		}
+		for _, lp := range defaultLeavePolicies {
+			if err := r.db.WithContext(ctx).Create(&lp).Error; err != nil {
+				return err
+			}
+		}
+	}
+
+	// Double check validation
+	var typeCount int64
+	if err := r.db.WithContext(ctx).Model(&models.LeavePolicy{}).
+		Where("organisation_id = ? AND (LOWER(leave_type) = LOWER(?) OR leave_type = ?)", l.OrganisationID, l.LeaveType, l.LeaveType).
+		Count(&typeCount).Error; err != nil {
+		return err
+	}
+	if typeCount == 0 {
+		return fmt.Errorf("invalid leave type: %s does not exist in the leave policies configured for this organisation", l.LeaveType)
+	}
+
 	model := toModel(l)
 	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
 		return err
