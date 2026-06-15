@@ -80,17 +80,21 @@ import (
 	researchService "server/internal/usecase/research"
 	peopleService "server/internal/usecase/people"
 	settingsService "server/internal/usecase/settings"
+	"server/internal/platform/redis"
+	"context"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
-func SetupRoutes(r *gin.Engine) {
+func SetupRoutes(ctx context.Context, r *gin.Engine) {
 	validateToken := middlewares.ValidateToken()
 
 	// Initialize WebSocket hub and broadcaster
 	hub := websocket.NewHub()
 	go hub.Run()
-	broadcaster := websocket.NewBroadcaster(hub)
+	broadcaster := websocket.NewRedisBroadcaster(hub, redis.Client, "notifications")
+	go websocket.StartSubscriber(ctx, redis.Client, "notifications", hub)
 	wsManager := websocket.NewManager(hub)
 
 	notificationRepository := notificationsRepo.NewGormRepository(database.DB)
@@ -114,11 +118,13 @@ func SetupRoutes(r *gin.Engine) {
 	organisationHTTP.RegisterRoutes(r, organisationHandler, validateToken)
 
 	gmailMailer := mailerPlatform.NewGmailMailer()
-	authRepository := authRepo.NewGormRepository(database.DB)
+	gormAuthRepository := authRepo.NewGormRepository(database.DB)
+	authRepository := authRepo.NewRedisRepository(redis.Client, gormAuthRepository)
 	empRepository := employeeRepo.NewGormRepository(database.DB)
 	authUseCase := authService.NewService(authRepository, empRepository, gmailMailer)
 	authHandler := authHTTP.NewHandler(authUseCase)
-	authHTTP.RegisterRoutes(r, authHandler, validateToken)
+	authRateLimiter := middlewares.RateLimiter(redis.Client, 10, time.Minute)
+	authHTTP.RegisterRoutes(r, authHandler, validateToken, authRateLimiter)
 
 	employeeUseCase := employeeService.NewService(empRepository, authRepository, organisationRepository)
 	employeeHandler := employeeHTTP.NewHandler(employeeUseCase)

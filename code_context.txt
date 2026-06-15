@@ -1,6 +1,6 @@
 # Code Context
-# Generated: 2026-06-14T21:21:03+05:30
-# Files: 240
+# Generated: 2026-06-15T23:48:46+05:30
+# Files: 244
 #
 # To extract all files back to disk, run:
 #   awk '/^BEGIN_FILE:/{f=substr($0,11); sub(/^:/, "", f); next} /^END_FILE:/{f=""; next} f{print > f}' code_context.txt
@@ -2724,7 +2724,7 @@ func isValidStatus(status string) bool {
 	return false
 }
 END_FILE:internal/usecase/research/usecase.go
-# path: internal/adapters/http/settings/handler.go | lang: go | tokens: 3627 | size: 14510
+# path: internal/adapters/http/settings/handler.go | lang: go | tokens: 3645 | size: 14582
 # functions: NewHandler, getUserAuthInfo
 BEGIN_FILE:internal/adapters/http/settings/handler.go
 package settings
@@ -3160,6 +3160,7 @@ func (h *Handler) UpdateUserProfile(c *gin.Context) {
 		City        string `json:"city"`
 		Country     string `json:"country"`
 		DateOfBirth string `json:"date_of_birth"`
+		ProfilePic  string `json:"profile_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -3187,6 +3188,7 @@ func (h *Handler) UpdateUserProfile(c *gin.Context) {
 		City:        req.City,
 		Country:     req.Country,
 		DateOfBirth: dob,
+		ProfilePic:  req.ProfilePic,
 	}
 
 	err := h.uc.UpdateUserProfile(userID, &profile)
@@ -4301,7 +4303,7 @@ func (h *Handler) Export(c *gin.Context) {
 	})
 }
 END_FILE:internal/adapters/http/resources/handler.go
-# path: internal/adapters/repository/settings/gorm_repository.go | lang: go | tokens: 3243 | size: 12972
+# path: internal/adapters/repository/settings/gorm_repository.go | lang: go | tokens: 3259 | size: 13036
 # functions: NewGormRepository
 BEGIN_FILE:internal/adapters/repository/settings/gorm_repository.go
 package settings
@@ -4672,6 +4674,7 @@ func (r *gormRepository) GetUserProfile(userID uint) (*settings.UserProfile, err
 		City:        m.City,
 		Country:     m.Country,
 		DateOfBirth: m.DateOfBirth,
+		ProfilePic:  m.ProfilePic,
 	}, nil
 }
 
@@ -4686,6 +4689,7 @@ func (r *gormRepository) UpdateUserProfile(userID uint, profile *settings.UserPr
 	m.City = profile.City
 	m.Country = profile.Country
 	m.DateOfBirth = profile.DateOfBirth
+	m.ProfilePic = profile.ProfilePic
 	return r.db.Save(&m).Error
 }
 
@@ -4778,7 +4782,7 @@ func (r *gormRepository) ExportOrgData(orgID uint) (string, error) {
 	return string(data), nil
 }
 END_FILE:internal/adapters/repository/settings/gorm_repository.go
-# path: internal/app/routes/routes.go | lang: go | tokens: 2867 | size: 11470
+# path: internal/app/routes/routes.go | lang: go | tokens: 2956 | size: 11824
 # functions: SetupRoutes
 BEGIN_FILE:internal/app/routes/routes.go
 package routes
@@ -4863,6 +4867,9 @@ import (
 	researchService "server/internal/usecase/research"
 	peopleService "server/internal/usecase/people"
 	settingsService "server/internal/usecase/settings"
+	"server/internal/platform/redis"
+	"context"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -4873,7 +4880,8 @@ func SetupRoutes(r *gin.Engine) {
 	// Initialize WebSocket hub and broadcaster
 	hub := websocket.NewHub()
 	go hub.Run()
-	broadcaster := websocket.NewBroadcaster(hub)
+	broadcaster := websocket.NewRedisBroadcaster(hub, redis.Client, "notifications")
+	go websocket.StartSubscriber(context.Background(), redis.Client, "notifications", hub)
 	wsManager := websocket.NewManager(hub)
 
 	notificationRepository := notificationsRepo.NewGormRepository(database.DB)
@@ -4897,11 +4905,13 @@ func SetupRoutes(r *gin.Engine) {
 	organisationHTTP.RegisterRoutes(r, organisationHandler, validateToken)
 
 	gmailMailer := mailerPlatform.NewGmailMailer()
-	authRepository := authRepo.NewGormRepository(database.DB)
+	gormAuthRepository := authRepo.NewGormRepository(database.DB)
+	authRepository := authRepo.NewRedisRepository(redis.Client, gormAuthRepository)
 	empRepository := employeeRepo.NewGormRepository(database.DB)
 	authUseCase := authService.NewService(authRepository, empRepository, gmailMailer)
 	authHandler := authHTTP.NewHandler(authUseCase)
-	authHTTP.RegisterRoutes(r, authHandler, validateToken)
+	authRateLimiter := middlewares.RateLimiter(redis.Client, 10, time.Minute)
+	authHTTP.RegisterRoutes(r, authHandler, validateToken, authRateLimiter)
 
 	employeeUseCase := employeeService.NewService(empRepository, authRepository, organisationRepository)
 	employeeHandler := employeeHTTP.NewHandler(employeeUseCase)
@@ -6063,6 +6073,272 @@ func (r *GormRepository) GetParticipants(ctx context.Context, chatID uint) ([]do
 	return out, nil
 }
 END_FILE:internal/adapters/repository/chats/gorm_repository.go
+# path: internal/adapters/repository/employees/gorm_repository.go | lang: go | tokens: 2426 | size: 9705
+# functions: NewGormRepository, toModel, toDomain
+BEGIN_FILE:internal/adapters/repository/employees/gorm_repository.go
+package employees
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+	domain "server/internal/domain/employees"
+	orgDomain "server/internal/domain/organisation"
+	"server/internal/platform/database/models"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) GetByUserID(ctx context.Context, userID uint) (*domain.Employee, error) {
+	var model models.Employee
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("user_id = ?", userID).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) Create(ctx context.Context, emp *domain.Employee) error {
+	model := toModel(emp)
+	return r.db.WithContext(ctx).Create(model).Error
+}
+
+func (r *gormRepository) GetEmployeesByOrg(ctx context.Context, orgID uint) ([]domain.Employee, error) {
+	var modelsList []models.Employee
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("organisation_id = ?", orgID).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	result := make([]domain.Employee, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = *toDomain(&m)
+	}
+	return result, nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.Employee, error) {
+	var model models.Employee
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, emp *domain.Employee) error {
+	model := toModel(emp)
+	return r.db.WithContext(ctx).Model(&models.Employee{}).Where("user_id = ?", emp.UserID).Updates(model).Error
+}
+
+func (r *gormRepository) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Where("user_id = ?", id).Delete(&models.Employee{}).Error
+}
+
+func (r *gormRepository) Search(ctx context.Context, query string) ([]domain.Employee, error) {
+	var modelsList []models.Employee
+	// Searching in UserModel through joining
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").
+		Joins("JOIN user_models ON user_models.id = employees.user_id").
+		Where("user_models.first_name LIKE ? OR user_models.last_name LIKE ?", "%"+query+"%", "%"+query+"%").
+		Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	result := make([]domain.Employee, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = *toDomain(&m)
+	}
+	return result, nil
+}
+
+func (r *gormRepository) CreateManager(ctx context.Context, manager *domain.Manager) error {
+	model := &models.Manager{
+		UserID:         manager.UserID,
+		OrganisationID: manager.OrganisationID,
+		Type:           manager.Type,
+		Email:          manager.Email,
+		Salary:         manager.Salary,
+		LastLoginAt:    manager.LastLoginAt,
+	}
+	return r.db.WithContext(ctx).Create(model).Error
+}
+
+func (r *gormRepository) GetManagerByUserID(ctx context.Context, userID uint) (*domain.Manager, error) {
+	var model models.Manager
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("user_id = ?", userID).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return &domain.Manager{
+		UserID: model.UserID,
+		User: authDomain.User{
+			ID:             model.User.ID,
+			FirstName:      model.User.FirstName,
+			LastName:       model.User.LastName,
+			Email:          model.User.Email,
+			PhoneNumber:    model.User.PhoneNumber,
+			IsVerified:     model.User.IsVerified,
+			HashedPassword: model.User.HashedPassword,
+			ProfilePic:     model.User.ProfilePic,
+			City:           model.User.City,
+			Country:        model.User.Country,
+			DateOfBirth:    model.User.DateOfBirth,
+			LastLoginAt:    model.User.LastLoginAt,
+		},
+		OrganisationID: model.OrganisationID,
+		Organisation: orgDomain.Entity{
+			ID:                 model.Organisation.ID,
+			CompanyName:        model.Organisation.CompanyName,
+			CompanyCode:        model.Organisation.CompanyCode,
+			PrimaryContactName: model.Organisation.PrimaryContactName,
+			PrimaryEmail:       model.Organisation.PrimaryEmail,
+			PhoneNumber:        model.Organisation.PhoneNumber,
+			OfficeAddress:      model.Organisation.OfficeAddress,
+			City:               model.Organisation.City,
+			State:              model.Organisation.State,
+			PostalCode:         model.Organisation.PostalCode,
+			Country:            model.Organisation.Country,
+			PlanID:             model.Organisation.PlanID,
+			PlanStartDate:      model.Organisation.PlanStartDate,
+			PlanEndDate:        model.Organisation.PlanEndDate,
+			PlanStatus:         model.Organisation.PlanStatus,
+			MaxEmployees:       model.Organisation.MaxEmployees,
+			CompanyLogo:        model.Organisation.CompanyLogo,
+			Industry:           model.Organisation.Industry,
+			BillingAddress:     model.Organisation.BillingAddress,
+			CompanySize:        model.Organisation.CompanySize,
+			BossID:             model.Organisation.BossID,
+		},
+		Email:       model.Email,
+		Type:        model.Type,
+		Salary:      model.Salary,
+		LastLoginAt: model.LastLoginAt,
+	}, nil
+}
+
+func (r *gormRepository) CreateBoss(ctx context.Context, boss *domain.Boss) error {
+	model := &models.Boss{
+		UserID:         boss.UserID,
+		OrganisationID: boss.OrganisationID,
+		LastLoginAt:    boss.LastLoginAt,
+		Email:          boss.Email,
+	}
+	return r.db.WithContext(ctx).Create(model).Error
+}
+
+func (r *gormRepository) GetBossByUserID(ctx context.Context, userID uint) (*domain.Boss, error) {
+	var model models.Boss
+	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("user_id = ?", userID).First(&model).Error; err != nil {
+		return nil, err
+	}
+	return &domain.Boss{
+		UserID: model.UserID,
+		User: authDomain.User{
+			ID:             model.User.ID,
+			FirstName:      model.User.FirstName,
+			LastName:       model.User.LastName,
+			Email:          model.User.Email,
+			PhoneNumber:    model.User.PhoneNumber,
+			IsVerified:     model.User.IsVerified,
+			HashedPassword: model.User.HashedPassword,
+			ProfilePic:     model.User.ProfilePic,
+			City:           model.User.City,
+			Country:        model.User.Country,
+			DateOfBirth:    model.User.DateOfBirth,
+			LastLoginAt:    model.User.LastLoginAt,
+		},
+		Email:          model.Email,
+		OrganisationID: model.OrganisationID,
+		Organisation: orgDomain.Entity{
+			ID:                 model.Organisation.ID,
+			CompanyName:        model.Organisation.CompanyName,
+			CompanyCode:        model.Organisation.CompanyCode,
+			PrimaryContactName: model.Organisation.PrimaryContactName,
+			PrimaryEmail:       model.Organisation.PrimaryEmail,
+			PhoneNumber:        model.Organisation.PhoneNumber,
+			OfficeAddress:      model.Organisation.OfficeAddress,
+			City:               model.Organisation.City,
+			State:              model.Organisation.State,
+			PostalCode:         model.Organisation.PostalCode,
+			Country:            model.Organisation.Country,
+			PlanID:             model.Organisation.PlanID,
+			PlanStartDate:      model.Organisation.PlanStartDate,
+			PlanEndDate:        model.Organisation.PlanEndDate,
+			PlanStatus:         model.Organisation.PlanStatus,
+			MaxEmployees:       model.Organisation.MaxEmployees,
+			CompanyLogo:        model.Organisation.CompanyLogo,
+			Industry:           model.Organisation.Industry,
+			BillingAddress:     model.Organisation.BillingAddress,
+			CompanySize:        model.Organisation.CompanySize,
+			BossID:             model.Organisation.BossID,
+		},
+		LastLoginAt: model.LastLoginAt,
+	}, nil
+}
+
+func toModel(e *domain.Employee) *models.Employee {
+	return &models.Employee{
+		UserID:         e.UserID,
+		EmploymentID:   e.EmploymentID,
+		OrganisationID: e.OrganisationID,
+		Email:          e.Email,
+		Type:           e.Type,
+		Salary:         e.Salary,
+		LastLoginAt:    e.LastLoginAt,
+	}
+}
+
+func toDomain(m *models.Employee) *domain.Employee {
+	return &domain.Employee{
+		UserID: m.UserID,
+		User: authDomain.User{
+			ID:             m.User.ID,
+			FirstName:      m.User.FirstName,
+			LastName:       m.User.LastName,
+			Email:          m.User.Email,
+			PhoneNumber:    m.User.PhoneNumber,
+			IsVerified:     m.User.IsVerified,
+			HashedPassword: m.User.HashedPassword,
+			ProfilePic:     m.User.ProfilePic,
+			City:           m.User.City,
+			Country:        m.User.Country,
+			DateOfBirth:    m.User.DateOfBirth,
+			LastLoginAt:    m.User.LastLoginAt,
+		},
+		EmploymentID:   m.EmploymentID,
+		OrganisationID: m.OrganisationID,
+		Organisation: orgDomain.Entity{
+			ID:                 m.Organisation.ID,
+			CompanyName:        m.Organisation.CompanyName,
+			CompanyCode:        m.Organisation.CompanyCode,
+			PrimaryContactName: m.Organisation.PrimaryContactName,
+			PrimaryEmail:       m.Organisation.PrimaryEmail,
+			PhoneNumber:        m.Organisation.PhoneNumber,
+			OfficeAddress:      m.Organisation.OfficeAddress,
+			City:               m.Organisation.City,
+			State:              m.Organisation.State,
+			PostalCode:         m.Organisation.PostalCode,
+			Country:            m.Organisation.Country,
+			PlanID:             m.Organisation.PlanID,
+			PlanStartDate:      m.Organisation.PlanStartDate,
+			PlanEndDate:        m.Organisation.PlanEndDate,
+			PlanStatus:         m.Organisation.PlanStatus,
+			MaxEmployees:       m.Organisation.MaxEmployees,
+			CompanyLogo:        m.Organisation.CompanyLogo,
+			Industry:           m.Organisation.Industry,
+			BillingAddress:     m.Organisation.BillingAddress,
+			CompanySize:        m.Organisation.CompanySize,
+			BossID:             m.Organisation.BossID,
+		},
+		Email:       m.Email,
+		Type:        m.Type,
+		Salary:      m.Salary,
+		LastLoginAt: m.LastLoginAt,
+	}
+}
+END_FILE:internal/adapters/repository/employees/gorm_repository.go
 # path: internal/adapters/repository/search/gorm_repository.go | lang: go | tokens: 2334 | size: 9336
 # functions: NewGormRepository, contains, wantType
 BEGIN_FILE:internal/adapters/repository/search/gorm_repository.go
@@ -6681,7 +6957,7 @@ func (u *usecase) GetAnalytics(ctx context.Context, orgID uint) (*people.PeopleA
 	return u.repo.GetAnalytics(ctx, orgID)
 }
 END_FILE:internal/usecase/people/usecase.go
-# path: internal/usecase/auth/usecase.go | lang: go | tokens: 2256 | size: 9025
+# path: internal/usecase/auth/usecase.go | lang: go | tokens: 2267 | size: 9070
 # functions: NewService
 BEGIN_FILE:internal/usecase/auth/usecase.go
 package auth
@@ -6803,13 +7079,7 @@ func (s *service) ValidateEmployee(ctx context.Context, userID uint) (string, er
 		return "", ErrNotAnEmployee
 	}
 
-	empModel := models.Employee{
-		UserID:         employee.UserID,
-		OrganisationID: employee.OrganisationID,
-		Type:           employee.Type,
-	}
-
-	token, err := miscallenous.GenerateJWTToken(empModel, "employee", employee.UserID)
+	token, err := miscallenous.GenerateJWTToken(employee, "employee", employee.UserID)
 	if err != nil {
 		return "", err
 	}
@@ -6856,10 +7126,16 @@ func (s *service) Logout(ctx context.Context, rawRefreshToken string) error {
 // issueTokenPair generates a new access + refresh token pair and persists the refresh token.
 func (s *service) issueTokenPair(ctx context.Context, user *domain.User) (domain.TokenPair, error) {
 	userModel := models.UserModel{
-		FirstName:  user.FirstName,
-		LastName:   user.LastName,
-		Email:      user.Email,
-		IsVerified: user.IsVerified,
+		FirstName:   user.FirstName,
+		LastName:    user.LastName,
+		Email:       user.Email,
+		PhoneNumber: user.PhoneNumber,
+		IsVerified:  user.IsVerified,
+		ProfilePic:  user.ProfilePic,
+		City:        user.City,
+		Country:     user.Country,
+		DateOfBirth: user.DateOfBirth,
+		LastLoginAt: user.LastLoginAt,
 	}
 	userModel.ID = user.ID
 
@@ -8366,6 +8642,397 @@ func (h *Handler) GetEmployeeLeaveHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, history)
 }
 END_FILE:internal/adapters/http/leave/handler.go
+# path: internal/adapters/repository/tasks/gorm_repository.go | lang: go | tokens: 1678 | size: 6714
+# functions: NewGormRepository, toModel, toDomain, toDomainList
+BEGIN_FILE:internal/adapters/repository/tasks/gorm_repository.go
+package tasks
+
+import (
+	"context"
+	"fmt"
+	authDomain "server/internal/domain/auth"
+	domain "server/internal/domain/tasks"
+	orgDomain "server/internal/domain/organisation"
+	teamDomain "server/internal/domain/teams"
+	projectDomain "server/internal/domain/projects"
+	"server/internal/platform/database/models"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, task *domain.Task) error {
+	// 1. Verify/link TaskType to TaskType table
+	var count int64
+	if err := r.db.WithContext(ctx).Model(&models.TaskType{}).Where("organisation_id = ?", task.OrganisationID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		// Seed default task types for this organisation on the fly
+		defaultTaskTypes := []models.TaskType{
+			{OrganisationID: task.OrganisationID, Name: "Bug", Description: "Software bugs, issues, or defects"},
+			{OrganisationID: task.OrganisationID, Name: "Feature", Description: "New functionality or improvements"},
+			{OrganisationID: task.OrganisationID, Name: "Story", Description: "User stories or general tasks"},
+		}
+		for _, tt := range defaultTaskTypes {
+			if err := r.db.WithContext(ctx).Create(&tt).Error; err != nil {
+				return err
+			}
+		}
+	}
+
+	// Double check validation
+	var typeCount int64
+	if err := r.db.WithContext(ctx).Model(&models.TaskType{}).
+		Where("organisation_id = ? AND (LOWER(name) = LOWER(?) OR name = ?)", task.OrganisationID, task.Type, task.Type).
+		Count(&typeCount).Error; err != nil {
+		return err
+	}
+	if typeCount == 0 {
+		return fmt.Errorf("invalid task type: %s does not exist in the task types configured for this organisation", task.Type)
+	}
+
+	model := toModel(task)
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	task.ID = model.ID
+	return nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, task *domain.Task) error {
+	model := toModel(task)
+	return r.db.WithContext(ctx).Model(&models.Task{}).Where("id = ?", task.ID).Updates(model).Error
+}
+
+func (r *gormRepository) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Model(&models.Task{}).Where("id = ?", id).Update("deleted_at", time.Now()).Error
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.Task, error) {
+	var model models.Task
+	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").Preload("Team").Preload("Project").First(&model, id).Error; err != nil {
+		return nil, err
+	}
+	return toDomain(&model), nil
+}
+
+func (r *gormRepository) GetByTeam(ctx context.Context, userID uint) ([]domain.Task, error) {
+	var modelsList []models.Task
+	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").Where("assigned_to = ?", userID).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func (r *gormRepository) GetByProject(ctx context.Context, projectID uint, page int) ([]domain.Task, error) {
+	var modelsList []models.Task
+	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").
+		Where("project_id = ?", projectID).Limit(20).Offset((page - 1) * 20).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func (r *gormRepository) GetPersonal(ctx context.Context, userID uint, page, pageSize int) ([]domain.Task, int64, error) {
+	var modelsList []models.Task
+	var count int64
+	query := r.db.WithContext(ctx).Model(&models.Task{}).Where("assigned_to = ?", userID)
+	if err := query.Count(&count).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := query.Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").
+		Limit(pageSize).Offset((page - 1) * pageSize).Find(&modelsList).Error; err != nil {
+		return nil, 0, err
+	}
+	return toDomainList(modelsList), count, nil
+}
+
+func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint, page, pageSize int) ([]domain.Task, int64, error) {
+	var modelsList []models.Task
+	var count int64
+	query := r.db.WithContext(ctx).Model(&models.Task{}).Where("organisation_id = ?", orgID)
+	if err := query.Count(&count).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := query.Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").
+		Limit(pageSize).Offset((page - 1) * pageSize).Find(&modelsList).Error; err != nil {
+		return nil, 0, err
+	}
+	return toDomainList(modelsList), count, nil
+}
+
+func (r *gormRepository) GetByTitle(ctx context.Context, title string) ([]domain.Task, error) {
+	var modelsList []models.Task
+	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").Where("title = ?", title).Find(&modelsList).Error; err != nil {
+		return nil, err
+	}
+	return toDomainList(modelsList), nil
+}
+
+func toModel(t *domain.Task) *models.Task {
+	return &models.Task{
+		Title:          t.Title,
+		Description:    t.Description,
+		DueDate:        t.DueDate,
+		AssignedTo:     t.AssignedTo,
+		AssignedBy:     t.AssignedBy,
+		Type:           t.Type,
+		Priority:       t.Priority,
+		Status:         t.Status,
+		OrganisationID: t.OrganisationID,
+		IsPersonal:     t.IsPersonal,
+		TeamID:         t.TeamID,
+		ProjectID:      t.ProjectID,
+	}
+}
+
+func toDomain(m *models.Task) *domain.Task {
+	t := &domain.Task{
+		ID:             m.ID,
+		Title:          m.Title,
+		Description:    m.Description,
+		DueDate:        m.DueDate,
+		AssignedTo:     m.AssignedTo,
+		AssignedBy:     m.AssignedBy,
+		Type:           m.Type,
+		Priority:       m.Priority,
+		Status:         m.Status,
+		OrganisationID: m.OrganisationID,
+		IsPersonal:     m.IsPersonal,
+		TeamID:         m.TeamID,
+		ProjectID:      m.ProjectID,
+	}
+	if m.AssignedUser != nil {
+		t.AssignedUser = &authDomain.User{ID: m.AssignedUser.ID, FirstName: m.AssignedUser.FirstName, LastName: m.AssignedUser.LastName}
+	}
+	if m.AssignedByUser != nil {
+		t.AssignedByUser = &authDomain.User{ID: m.AssignedByUser.ID, FirstName: m.AssignedByUser.FirstName, LastName: m.AssignedByUser.LastName}
+	}
+	if m.Organisation != nil {
+		t.Organisation = &orgDomain.Entity{ID: m.Organisation.ID, CompanyName: m.Organisation.CompanyName}
+	}
+	if m.Team != nil {
+		t.Team = &teamDomain.Team{ID: m.Team.ID, Name: m.Team.Name}
+	}
+	if m.Project != nil {
+		t.Project = &projectDomain.Project{ID: m.Project.ID, Name: m.Project.Name}
+	}
+	return t
+}
+
+func toDomainList(modelsList []models.Task) []domain.Task {
+	result := make([]domain.Task, len(modelsList))
+	for i, m := range modelsList {
+		result[i] = *toDomain(&m)
+	}
+	return result
+}
+END_FILE:internal/adapters/repository/tasks/gorm_repository.go
+# path: internal/usecase/invites/usecase.go | lang: go | tokens: 1518 | size: 6075
+# functions: NewService
+BEGIN_FILE:internal/usecase/invites/usecase.go
+package invites
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	authDomain "server/internal/domain/auth"
+	employeesDomain "server/internal/domain/employees"
+	domain "server/internal/domain/invites"
+	"server/internal/platform/database/models"
+	"server/internal/platform/mailer"
+	"server/internal/platform/miscallenous"
+)
+
+type service struct {
+	repo         domain.Repository
+	userRepo     authDomain.Repository
+	employeeRepo employeesDomain.Repository
+	mailer       mailer.Mailer
+}
+
+func NewService(repo domain.Repository, userRepo authDomain.Repository, employeeRepo employeesDomain.Repository, m mailer.Mailer) domain.UseCase {
+	return &service{
+		repo:         repo,
+		userRepo:     userRepo,
+		employeeRepo: employeeRepo,
+		mailer:       m,
+	}
+}
+
+func (s *service) InviteEmployee(ctx context.Context, invite *domain.EmployeeInvite) error {
+	// 1. Check duplicate
+	existing, err := s.repo.GetByEmail(ctx, invite.Email, invite.OrganisationID)
+	if err == nil && existing != nil {
+		return errors.New("an active invitation already exists for this email in the organisation")
+	}
+
+	// 2. Generate secure token
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return err
+	}
+	invite.Token = hex.EncodeToString(b)
+
+	// 3. Set properties
+	invite.Status = "pending"
+	invite.ExpiresAt = time.Now().Add(72 * time.Hour)
+
+	// 4. Persist to DB
+	if err := s.repo.Create(ctx, invite); err != nil {
+		return err
+	}
+
+	// 5. Build accept URL
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "https://sampnet.achiket.site" // fallback default
+	}
+	inviteURL := fmt.Sprintf("%s/accept-invite?token=%s", frontendURL, invite.Token)
+
+	// 6. Build HTML body
+	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; margin: 0; padding: 20px;">
+  <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+    <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-top: 0;">You're Invited!</h2>
+    <p>Hello %s,</p>
+    <p>You have been invited to join the organisation as an employee. Click the button below to set up your account and get started:</p>
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="%s" style="background-color: #3498db; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 4px; font-weight: bold; display: inline-block;">Accept Invitation</a>
+    </div>
+    <p style="font-size: 0.9em; color: #7f8c8d;">If the button doesn't work, copy and paste this link into your web browser:</p>
+    <p style="font-size: 0.9em; word-break: break-all; color: #3498db;"><a href="%s" style="color: #3498db;">%s</a></p>
+    <hr style="border: 0; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
+    <p style="font-size: 0.8em; color: #95a5a6; text-align: center;">This invitation expires in <strong>72 hours</strong>.</p>
+  </div>
+</body>
+</html>`, invite.FirstName, inviteURL, inviteURL, inviteURL)
+
+	// 7. Send the email
+	err = s.mailer.SendMail(invite.Email, "You're invited", htmlBody)
+	log.Default().Println(err)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *service) AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error) {
+	// 1. Look up invite
+	invite, err := s.repo.GetByToken(ctx, token)
+	if err != nil {
+		return authDomain.TokenPair{}, errors.New("invalid or expired invitation link")
+	}
+
+	// 2. Validate state
+	if invite.Status != "pending" {
+		return authDomain.TokenPair{}, errors.New("this invitation has already been used")
+	}
+	if time.Now().After(invite.ExpiresAt) {
+		return authDomain.TokenPair{}, errors.New("this invitation has expired")
+	}
+
+	// 3. Check if user already exists
+	var user *authDomain.User
+	hashed, errPassword := miscallenous.HashPassword(password)
+	if errPassword != nil {
+		return authDomain.TokenPair{}, errPassword
+	}
+
+	existingUser, err := s.userRepo.GetByEmail(ctx, invite.Email)
+	if err != nil {
+		// User does not exist — create them
+		user = &authDomain.User{
+			FirstName:      invite.FirstName,
+			LastName:       invite.LastName,
+			Email:          invite.Email,
+			PhoneNumber:    invite.PhoneNumber,
+			HashedPassword: hashed,
+			IsVerified:     true,
+		}
+	} else {
+		// User exists — update verification status and password
+		user = existingUser
+		user.HashedPassword = hashed
+		user.IsVerified = true
+	}
+
+	// 4. Build employee record
+	employee := &employeesDomain.Employee{
+		UserID:         user.ID,
+		OrganisationID: invite.OrganisationID,
+		EmploymentID:   invite.EmploymentID,
+		Email:          invite.Email,
+	}
+
+	// 5. Delegate atomically
+	if err := s.repo.AcceptInvite(ctx, invite.ID, user, employee); err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	// 6. Generate token pair
+	userModel := models.UserModel{
+		FirstName:   user.FirstName,
+		LastName:    user.LastName,
+		Email:       user.Email,
+		PhoneNumber: user.PhoneNumber,
+		IsVerified:  user.IsVerified,
+		ProfilePic:  user.ProfilePic,
+		City:        user.City,
+		Country:     user.Country,
+		DateOfBirth: user.DateOfBirth,
+		LastLoginAt: user.LastLoginAt,
+	}
+	userModel.ID = user.ID
+
+	accessToken, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
+	if err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	rawRefresh, err := miscallenous.GenerateRefreshToken()
+	if err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	refreshRecord := &authDomain.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: miscallenous.HashRefreshToken(rawRefresh),
+		ExpiresAt: miscallenous.RefreshTokenExpiresAt(),
+		Revoked:   false,
+	}
+
+	if err := s.userRepo.SaveRefreshToken(ctx, refreshRecord); err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	return authDomain.TokenPair{
+		AccessToken:  accessToken,
+		RefreshToken: rawRefresh,
+	}, nil
+}
+
+func (s *service) GetInvitesByOrg(ctx context.Context, orgID uint) ([]domain.EmployeeInvite, error) {
+	return s.repo.GetByOrg(ctx, orgID)
+}
+END_FILE:internal/usecase/invites/usecase.go
 # path: internal/adapters/repository/projects/gorm_repository.go | lang: go | tokens: 1476 | size: 5904
 # functions: NewGormRepository, toModel, toDomain, toDomainList
 BEGIN_FILE:internal/adapters/repository/projects/gorm_repository.go
@@ -8559,207 +9226,17 @@ func toDomainList(modelsList []models.Project) []domain.Project {
 }
 
 END_FILE:internal/adapters/repository/projects/gorm_repository.go
-# path: internal/usecase/invites/usecase.go | lang: go | tokens: 1471 | size: 5885
-# functions: NewService
-BEGIN_FILE:internal/usecase/invites/usecase.go
-package invites
-
-import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
-	"fmt"
-	"log"
-	"os"
-	"time"
-
-	authDomain "server/internal/domain/auth"
-	employeesDomain "server/internal/domain/employees"
-	domain "server/internal/domain/invites"
-	"server/internal/platform/database/models"
-	"server/internal/platform/mailer"
-	"server/internal/platform/miscallenous"
-)
-
-type service struct {
-	repo         domain.Repository
-	userRepo     authDomain.Repository
-	employeeRepo employeesDomain.Repository
-	mailer       mailer.Mailer
-}
-
-func NewService(repo domain.Repository, userRepo authDomain.Repository, employeeRepo employeesDomain.Repository, m mailer.Mailer) domain.UseCase {
-	return &service{
-		repo:         repo,
-		userRepo:     userRepo,
-		employeeRepo: employeeRepo,
-		mailer:       m,
-	}
-}
-
-func (s *service) InviteEmployee(ctx context.Context, invite *domain.EmployeeInvite) error {
-	// 1. Check duplicate
-	existing, err := s.repo.GetByEmail(ctx, invite.Email, invite.OrganisationID)
-	if err == nil && existing != nil {
-		return errors.New("an active invitation already exists for this email in the organisation")
-	}
-
-	// 2. Generate secure token
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return err
-	}
-	invite.Token = hex.EncodeToString(b)
-
-	// 3. Set properties
-	invite.Status = "pending"
-	invite.ExpiresAt = time.Now().Add(72 * time.Hour)
-
-	// 4. Persist to DB
-	if err := s.repo.Create(ctx, invite); err != nil {
-		return err
-	}
-
-	// 5. Build accept URL
-	frontendURL := os.Getenv("FRONTEND_URL")
-	if frontendURL == "" {
-		frontendURL = "https://sampnet.achiket.site" // fallback default
-	}
-	inviteURL := fmt.Sprintf("%s/accept-invite?token=%s", frontendURL, invite.Token)
-
-	// 6. Build HTML body
-	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; margin: 0; padding: 20px;">
-  <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-    <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-top: 0;">You're Invited!</h2>
-    <p>Hello %s,</p>
-    <p>You have been invited to join the organisation as an employee. Click the button below to set up your account and get started:</p>
-    <div style="text-align: center; margin: 30px 0;">
-      <a href="%s" style="background-color: #3498db; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 4px; font-weight: bold; display: inline-block;">Accept Invitation</a>
-    </div>
-    <p style="font-size: 0.9em; color: #7f8c8d;">If the button doesn't work, copy and paste this link into your web browser:</p>
-    <p style="font-size: 0.9em; word-break: break-all; color: #3498db;"><a href="%s" style="color: #3498db;">%s</a></p>
-    <hr style="border: 0; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
-    <p style="font-size: 0.8em; color: #95a5a6; text-align: center;">This invitation expires in <strong>72 hours</strong>.</p>
-  </div>
-</body>
-</html>`, invite.FirstName, inviteURL, inviteURL, inviteURL)
-
-	// 7. Send the email
-	err = s.mailer.SendMail(invite.Email, "You're invited", htmlBody)
-	log.Default().Println(err)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *service) AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error) {
-	// 1. Look up invite
-	invite, err := s.repo.GetByToken(ctx, token)
-	if err != nil {
-		return authDomain.TokenPair{}, errors.New("invalid or expired invitation link")
-	}
-
-	// 2. Validate state
-	if invite.Status != "pending" {
-		return authDomain.TokenPair{}, errors.New("this invitation has already been used")
-	}
-	if time.Now().After(invite.ExpiresAt) {
-		return authDomain.TokenPair{}, errors.New("this invitation has expired")
-	}
-
-	// 3. Check if user already exists
-	var user *authDomain.User
-	hashed, errPassword := miscallenous.HashPassword(password)
-	if errPassword != nil {
-		return authDomain.TokenPair{}, errPassword
-	}
-
-	existingUser, err := s.userRepo.GetByEmail(ctx, invite.Email)
-	if err != nil {
-		// User does not exist — create them
-		user = &authDomain.User{
-			FirstName:      invite.FirstName,
-			LastName:       invite.LastName,
-			Email:          invite.Email,
-			PhoneNumber:    invite.PhoneNumber,
-			HashedPassword: hashed,
-			IsVerified:     true,
-		}
-	} else {
-		// User exists — update verification status and password
-		user = existingUser
-		user.HashedPassword = hashed
-		user.IsVerified = true
-	}
-
-	// 4. Build employee record
-	employee := &employeesDomain.Employee{
-		UserID:         user.ID,
-		OrganisationID: invite.OrganisationID,
-		EmploymentID:   invite.EmploymentID,
-		Email:          invite.Email,
-	}
-
-	// 5. Delegate atomically
-	if err := s.repo.AcceptInvite(ctx, invite.ID, user, employee); err != nil {
-		return authDomain.TokenPair{}, err
-	}
-
-	// 6. Generate token pair
-	userModel := models.UserModel{
-		FirstName:  user.FirstName,
-		LastName:   user.LastName,
-		Email:      user.Email,
-		IsVerified: user.IsVerified,
-	}
-	userModel.ID = user.ID
-
-	accessToken, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
-	if err != nil {
-		return authDomain.TokenPair{}, err
-	}
-
-	rawRefresh, err := miscallenous.GenerateRefreshToken()
-	if err != nil {
-		return authDomain.TokenPair{}, err
-	}
-
-	refreshRecord := &authDomain.RefreshToken{
-		UserID:    user.ID,
-		TokenHash: miscallenous.HashRefreshToken(rawRefresh),
-		ExpiresAt: miscallenous.RefreshTokenExpiresAt(),
-		Revoked:   false,
-	}
-
-	if err := s.userRepo.SaveRefreshToken(ctx, refreshRecord); err != nil {
-		return authDomain.TokenPair{}, err
-	}
-
-	return authDomain.TokenPair{
-		AccessToken:  accessToken,
-		RefreshToken: rawRefresh,
-	}, nil
-}
-
-func (s *service) GetInvitesByOrg(ctx context.Context, orgID uint) ([]domain.EmployeeInvite, error) {
-	return s.repo.GetByOrg(ctx, orgID)
-}
-END_FILE:internal/usecase/invites/usecase.go
-# path: internal/adapters/repository/employees/gorm_repository.go | lang: go | tokens: 1440 | size: 5762
+# path: internal/adapters/repository/leave/gorm_repository.go | lang: go | tokens: 1467 | size: 5871
 # functions: NewGormRepository, toModel, toDomain
-BEGIN_FILE:internal/adapters/repository/employees/gorm_repository.go
-package employees
+BEGIN_FILE:internal/adapters/repository/leave/gorm_repository.go
+package leave
 
 import (
 	"context"
-	authDomain "server/internal/domain/auth"
-	domain "server/internal/domain/employees"
-	orgDomain "server/internal/domain/organisation"
+	"fmt"
+	"server/internal/domain/leave"
 	"server/internal/platform/database/models"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -8768,175 +9245,195 @@ type gormRepository struct {
 	db *gorm.DB
 }
 
-func NewGormRepository(db *gorm.DB) domain.Repository {
+func NewGormRepository(db *gorm.DB) leave.Repository {
 	return &gormRepository{db: db}
 }
 
-func (r *gormRepository) GetByUserID(ctx context.Context, userID uint) (*domain.Employee, error) {
-	var model models.Employee
-	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("user_id = ?", userID).First(&model).Error; err != nil {
+func (r *gormRepository) Create(ctx context.Context, l *leave.Leave) error {
+	// 1. Verify/link LeaveType to LeavePolicy
+	var count int64
+	if err := r.db.WithContext(ctx).Model(&models.LeavePolicy{}).Where("organisation_id = ?", l.OrganisationID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		// Seed default leave policies for this organisation on the fly
+		defaultLeavePolicies := []models.LeavePolicy{
+			{OrganisationID: l.OrganisationID, LeaveType: "annual", MaxDays: 20, Description: "Standard annual vacation allowance"},
+			{OrganisationID: l.OrganisationID, LeaveType: "sick", MaxDays: 10, Description: "Sick leave for medical recovery"},
+			{OrganisationID: l.OrganisationID, LeaveType: "unpaid", MaxDays: 30, Description: "Unpaid time off"},
+			{OrganisationID: l.OrganisationID, LeaveType: "maternity", MaxDays: 90, Description: "Maternity leave for new mothers"},
+			{OrganisationID: l.OrganisationID, LeaveType: "paternity", MaxDays: 15, Description: "Paternity leave for new fathers"},
+			{OrganisationID: l.OrganisationID, LeaveType: "emergency", MaxDays: 5, Description: "Emergency or compassionate leave"},
+		}
+		for _, lp := range defaultLeavePolicies {
+			if err := r.db.WithContext(ctx).Create(&lp).Error; err != nil {
+				return err
+			}
+		}
+	}
+
+	// Double check validation
+	var typeCount int64
+	if err := r.db.WithContext(ctx).Model(&models.LeavePolicy{}).
+		Where("organisation_id = ? AND (LOWER(leave_type) = LOWER(?) OR leave_type = ?)", l.OrganisationID, l.LeaveType, l.LeaveType).
+		Count(&typeCount).Error; err != nil {
+		return err
+	}
+	if typeCount == 0 {
+		return fmt.Errorf("invalid leave type: %s does not exist in the leave policies configured for this organisation", l.LeaveType)
+	}
+
+	model := toModel(l)
+	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
+		return err
+	}
+	l.ID = model.ID
+	l.CreatedAt = model.CreatedAt
+	l.UpdatedAt = model.UpdatedAt
+	return nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*leave.Leave, error) {
+	var model models.Leave
+	if err := r.db.WithContext(ctx).Preload("Employee").Preload("Manager").First(&model, id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return toDomain(&model), nil
 }
 
-func (r *gormRepository) Create(ctx context.Context, emp *domain.Employee) error {
-	model := toModel(emp)
-	return r.db.WithContext(ctx).Create(model).Error
-}
-
-func (r *gormRepository) GetEmployeesByOrg(ctx context.Context, orgID uint) ([]domain.Employee, error) {
-	var modelsList []models.Employee
-	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("organisation_id = ?", orgID).Find(&modelsList).Error; err != nil {
-		return nil, err
-	}
-	result := make([]domain.Employee, len(modelsList))
-	for i, m := range modelsList {
-		result[i] = *toDomain(&m)
-	}
-	return result, nil
-}
-
-func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.Employee, error) {
-	var model models.Employee
-	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").First(&model, id).Error; err != nil {
-		return nil, err
-	}
-	return toDomain(&model), nil
-}
-
-func (r *gormRepository) Update(ctx context.Context, emp *domain.Employee) error {
-	model := toModel(emp)
-	return r.db.WithContext(ctx).Model(&models.Employee{}).Where("user_id = ?", emp.UserID).Updates(model).Error
-}
-
-func (r *gormRepository) Delete(ctx context.Context, id uint) error {
-	return r.db.WithContext(ctx).Where("user_id = ?", id).Delete(&models.Employee{}).Error
-}
-
-func (r *gormRepository) Search(ctx context.Context, query string) ([]domain.Employee, error) {
-	var modelsList []models.Employee
-	// Searching in UserModel through joining
-	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").
-		Joins("JOIN user_models ON user_models.id = employees.user_id").
-		Where("user_models.first_name LIKE ? OR user_models.last_name LIKE ?", "%"+query+"%", "%"+query+"%").
+func (r *gormRepository) GetByEmployee(ctx context.Context, employeeID uint, offset int) ([]leave.Leave, error) {
+	var modelsList []models.Leave
+	if err := r.db.WithContext(ctx).
+		Where("employee_id = ?", employeeID).
+		Order("created_at DESC").
+		Limit(20).
+		Offset(offset * 20).
+		Preload("Employee").
 		Find(&modelsList).Error; err != nil {
 		return nil, err
 	}
-	result := make([]domain.Employee, len(modelsList))
+
+	leaves := make([]leave.Leave, len(modelsList))
 	for i, m := range modelsList {
-		result[i] = *toDomain(&m)
+		leaves[i] = *toDomain(&m)
 	}
-	return result, nil
+	return leaves, nil
 }
 
-func (r *gormRepository) CreateManager(ctx context.Context, manager *domain.Manager) error {
-	model := &models.Manager{
-		UserID:         manager.UserID,
-		OrganisationID: manager.OrganisationID,
-		Type:           manager.Type,
-		Email:          manager.Email,
-		Salary:         manager.Salary,
-		LastLoginAt:    manager.LastLoginAt,
+func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint, status string, offset int) ([]leave.Leave, error) {
+	query := r.db.WithContext(ctx).Where("organisation_id = ?", orgID)
+	if status != "" {
+		query = query.Where("status = ?", status)
 	}
-	return r.db.WithContext(ctx).Create(model).Error
-}
 
-func (r *gormRepository) GetManagerByUserID(ctx context.Context, userID uint) (*domain.Manager, error) {
-	var model models.Manager
-	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("user_id = ?", userID).First(&model).Error; err != nil {
+	var modelsList []models.Leave
+	if err := query.
+		Order("created_at DESC").
+		Limit(20).
+		Offset(offset * 20).
+		Preload("Employee").
+		Find(&modelsList).Error; err != nil {
 		return nil, err
 	}
-	return &domain.Manager{
-		UserID: model.UserID,
-		User: authDomain.User{
-			ID:          model.User.ID,
-			FirstName:   model.User.FirstName,
-			LastName:    model.User.LastName,
-			Email:       model.User.Email,
-			PhoneNumber: model.User.PhoneNumber,
-		},
-		OrganisationID: model.OrganisationID,
-		Organisation: orgDomain.Entity{
-			ID:          model.Organisation.ID,
-			CompanyName: model.Organisation.CompanyName,
-		},
-		Email:       model.Email,
-		Type:        model.Type,
-		Salary:      model.Salary,
-		LastLoginAt: model.LastLoginAt,
-	}, nil
-}
 
-func (r *gormRepository) CreateBoss(ctx context.Context, boss *domain.Boss) error {
-	model := &models.Boss{
-		UserID:         boss.UserID,
-		OrganisationID: boss.OrganisationID,
-		LastLoginAt:    boss.LastLoginAt,
-		Email:          boss.Email,
+	leaves := make([]leave.Leave, len(modelsList))
+	for i, m := range modelsList {
+		leaves[i] = *toDomain(&m)
 	}
-	return r.db.WithContext(ctx).Create(model).Error
+	return leaves, nil
 }
 
-func (r *gormRepository) GetBossByUserID(ctx context.Context, userID uint) (*domain.Boss, error) {
-	var model models.Boss
-	if err := r.db.WithContext(ctx).Preload("User").Preload("Organisation").Where("user_id = ?", userID).First(&model).Error; err != nil {
+func (r *gormRepository) GetHistoryByEmployee(ctx context.Context, employeeID uint, status string, from *time.Time, to *time.Time, limit int, offset int) ([]leave.Leave, error) {
+	query := r.db.WithContext(ctx).Where("employee_id = ?", employeeID)
+
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	if from != nil {
+		query = query.Where("start_date >= ?", *from)
+	}
+	if to != nil {
+		query = query.Where("end_date <= ?", *to)
+	}
+
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+
+	var modelsList []models.Leave
+	if err := query.
+		Order("created_at DESC").
+		Offset(offset).
+		Find(&modelsList).Error; err != nil {
 		return nil, err
 	}
-	return &domain.Boss{
-		UserID: model.UserID,
-		User: authDomain.User{
-			ID:          model.User.ID,
-			FirstName:   model.User.FirstName,
-			LastName:    model.User.LastName,
-			Email:       model.User.Email,
-			PhoneNumber: model.User.PhoneNumber,
-		},
-		Email:          model.Email,
-		OrganisationID: model.OrganisationID,
-		Organisation: orgDomain.Entity{
-			ID:          model.Organisation.ID,
-			CompanyName: model.Organisation.CompanyName,
-		},
-		LastLoginAt: model.LastLoginAt,
-	}, nil
+
+	leaves := make([]leave.Leave, len(modelsList))
+	for i, m := range modelsList {
+		leaves[i] = *toDomain(&m)
+	}
+	return leaves, nil
 }
 
-func toModel(e *domain.Employee) *models.Employee {
-	return &models.Employee{
-		UserID:         e.UserID,
-		EmploymentID:   e.EmploymentID,
-		OrganisationID: e.OrganisationID,
-		Email:          e.Email,
-		Type:           e.Type,
-		Salary:         e.Salary,
-		LastLoginAt:    e.LastLoginAt,
+func (r *gormRepository) Update(ctx context.Context, l *leave.Leave) error {
+	model := toModel(l)
+	return r.db.WithContext(ctx).Model(&models.Leave{}).Where("id = ?", l.ID).Save(model).Error
+}
+
+func (r *gormRepository) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Delete(&models.Leave{}, id).Error
+}
+
+func toModel(l *leave.Leave) *models.Leave {
+	var managerID *uint
+	if l.ManagerID != 0 {
+		managerID = &l.ManagerID
+	}
+	return &models.Leave{
+		Model: gorm.Model{
+			ID:        l.ID,
+			CreatedAt: l.CreatedAt,
+			UpdatedAt: l.UpdatedAt,
+		},
+		EmployeeID:     l.EmployeeID,
+		OrganisationID: l.OrganisationID,
+		ManagerID:      managerID,
+		LeaveType:      l.LeaveType,
+		StartDate:      l.StartDate,
+		EndDate:        l.EndDate,
+		TotalDays:      l.TotalDays,
+		Reason:         l.Reason,
+		Status:         l.Status,
+		ManagerNote:    l.ManagerNote,
 	}
 }
 
-func toDomain(m *models.Employee) *domain.Employee {
-	return &domain.Employee{
-		UserID: m.UserID,
-		User: authDomain.User{
-			ID:          m.User.ID,
-			FirstName:   m.User.FirstName,
-			LastName:    m.User.LastName,
-			Email:       m.User.Email,
-			PhoneNumber: m.User.PhoneNumber,
-		},
-		EmploymentID:   m.EmploymentID,
+func toDomain(m *models.Leave) *leave.Leave {
+	var managerID uint
+	if m.ManagerID != nil {
+		managerID = *m.ManagerID
+	}
+	return &leave.Leave{
+		ID:             m.ID,
+		EmployeeID:     m.EmployeeID,
 		OrganisationID: m.OrganisationID,
-		Organisation: orgDomain.Entity{
-			ID:          m.Organisation.ID,
-			CompanyName: m.Organisation.CompanyName,
-		},
-		Email:       m.Email,
-		Type:        m.Type,
-		Salary:      m.Salary,
-		LastLoginAt: m.LastLoginAt,
+		ManagerID:      managerID,
+		LeaveType:      m.LeaveType,
+		StartDate:      m.StartDate,
+		EndDate:        m.EndDate,
+		TotalDays:      m.TotalDays,
+		Reason:         m.Reason,
+		Status:         m.Status,
+		ManagerNote:    m.ManagerNote,
+		CreatedAt:      m.CreatedAt,
+		UpdatedAt:      m.UpdatedAt,
 	}
 }
-END_FILE:internal/adapters/repository/employees/gorm_repository.go
+END_FILE:internal/adapters/repository/leave/gorm_repository.go
 # path: internal/platform/database/models/resource_models.go | lang: go | tokens: 1399 | size: 5598
 BEGIN_FILE:internal/platform/database/models/resource_models.go
 package models
@@ -9118,170 +9615,6 @@ type ResourceRecordAttachment struct {
 	UploadedAt   time.Time `gorm:"default:current_timestamp"`
 }
 END_FILE:internal/platform/database/models/resource_models.go
-# path: internal/adapters/repository/tasks/gorm_repository.go | lang: go | tokens: 1370 | size: 5481
-# functions: NewGormRepository, toModel, toDomain, toDomainList
-BEGIN_FILE:internal/adapters/repository/tasks/gorm_repository.go
-package tasks
-
-import (
-	"context"
-	authDomain "server/internal/domain/auth"
-	domain "server/internal/domain/tasks"
-	orgDomain "server/internal/domain/organisation"
-	teamDomain "server/internal/domain/teams"
-	projectDomain "server/internal/domain/projects"
-	"server/internal/platform/database/models"
-	"time"
-
-	"gorm.io/gorm"
-)
-
-type gormRepository struct {
-	db *gorm.DB
-}
-
-func NewGormRepository(db *gorm.DB) domain.Repository {
-	return &gormRepository{db: db}
-}
-
-func (r *gormRepository) Create(ctx context.Context, task *domain.Task) error {
-	model := toModel(task)
-	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
-		return err
-	}
-	task.ID = model.ID
-	return nil
-}
-
-func (r *gormRepository) Update(ctx context.Context, task *domain.Task) error {
-	model := toModel(task)
-	return r.db.WithContext(ctx).Model(&models.Task{}).Where("id = ?", task.ID).Updates(model).Error
-}
-
-func (r *gormRepository) Delete(ctx context.Context, id uint) error {
-	return r.db.WithContext(ctx).Model(&models.Task{}).Where("id = ?", id).Update("deleted_at", time.Now()).Error
-}
-
-func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.Task, error) {
-	var model models.Task
-	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").Preload("Team").Preload("Project").First(&model, id).Error; err != nil {
-		return nil, err
-	}
-	return toDomain(&model), nil
-}
-
-func (r *gormRepository) GetByTeam(ctx context.Context, userID uint) ([]domain.Task, error) {
-	var modelsList []models.Task
-	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").Where("assigned_to = ?", userID).Find(&modelsList).Error; err != nil {
-		return nil, err
-	}
-	return toDomainList(modelsList), nil
-}
-
-func (r *gormRepository) GetByProject(ctx context.Context, projectID uint, page int) ([]domain.Task, error) {
-	var modelsList []models.Task
-	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").
-		Where("project_id = ?", projectID).Limit(20).Offset((page - 1) * 20).Find(&modelsList).Error; err != nil {
-		return nil, err
-	}
-	return toDomainList(modelsList), nil
-}
-
-func (r *gormRepository) GetPersonal(ctx context.Context, userID uint, page, pageSize int) ([]domain.Task, int64, error) {
-	var modelsList []models.Task
-	var count int64
-	query := r.db.WithContext(ctx).Model(&models.Task{}).Where("assigned_to = ?", userID)
-	if err := query.Count(&count).Error; err != nil {
-		return nil, 0, err
-	}
-	if err := query.Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").
-		Limit(pageSize).Offset((page - 1) * pageSize).Find(&modelsList).Error; err != nil {
-		return nil, 0, err
-	}
-	return toDomainList(modelsList), count, nil
-}
-
-func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint, page, pageSize int) ([]domain.Task, int64, error) {
-	var modelsList []models.Task
-	var count int64
-	query := r.db.WithContext(ctx).Model(&models.Task{}).Where("organisation_id = ?", orgID)
-	if err := query.Count(&count).Error; err != nil {
-		return nil, 0, err
-	}
-	if err := query.Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").
-		Limit(pageSize).Offset((page - 1) * pageSize).Find(&modelsList).Error; err != nil {
-		return nil, 0, err
-	}
-	return toDomainList(modelsList), count, nil
-}
-
-func (r *gormRepository) GetByTitle(ctx context.Context, title string) ([]domain.Task, error) {
-	var modelsList []models.Task
-	if err := r.db.WithContext(ctx).Preload("AssignedUser").Preload("AssignedByUser").Preload("Organisation").Where("title = ?", title).Find(&modelsList).Error; err != nil {
-		return nil, err
-	}
-	return toDomainList(modelsList), nil
-}
-
-func toModel(t *domain.Task) *models.Task {
-	return &models.Task{
-		Title:          t.Title,
-		Description:    t.Description,
-		DueDate:        t.DueDate,
-		AssignedTo:     t.AssignedTo,
-		AssignedBy:     t.AssignedBy,
-		Type:           t.Type,
-		Priority:       t.Priority,
-		Status:         t.Status,
-		OrganisationID: t.OrganisationID,
-		IsPersonal:     t.IsPersonal,
-		TeamID:         t.TeamID,
-		ProjectID:      t.ProjectID,
-	}
-}
-
-func toDomain(m *models.Task) *domain.Task {
-	t := &domain.Task{
-		ID:             m.ID,
-		Title:          m.Title,
-		Description:    m.Description,
-		DueDate:        m.DueDate,
-		AssignedTo:     m.AssignedTo,
-		AssignedBy:     m.AssignedBy,
-		Type:           m.Type,
-		Priority:       m.Priority,
-		Status:         m.Status,
-		OrganisationID: m.OrganisationID,
-		IsPersonal:     m.IsPersonal,
-		TeamID:         m.TeamID,
-		ProjectID:      m.ProjectID,
-	}
-	if m.AssignedUser != nil {
-		t.AssignedUser = &authDomain.User{ID: m.AssignedUser.ID, FirstName: m.AssignedUser.FirstName, LastName: m.AssignedUser.LastName}
-	}
-	if m.AssignedByUser != nil {
-		t.AssignedByUser = &authDomain.User{ID: m.AssignedByUser.ID, FirstName: m.AssignedByUser.FirstName, LastName: m.AssignedByUser.LastName}
-	}
-	if m.Organisation != nil {
-		t.Organisation = &orgDomain.Entity{ID: m.Organisation.ID, CompanyName: m.Organisation.CompanyName}
-	}
-	if m.Team != nil {
-		t.Team = &teamDomain.Team{ID: m.Team.ID, Name: m.Team.Name}
-	}
-	if m.Project != nil {
-		t.Project = &projectDomain.Project{ID: m.Project.ID, Name: m.Project.Name}
-	}
-	return t
-}
-
-func toDomainList(modelsList []models.Task) []domain.Task {
-	result := make([]domain.Task, len(modelsList))
-	for i, m := range modelsList {
-		result[i] = *toDomain(&m)
-	}
-	return result
-}
-END_FILE:internal/adapters/repository/tasks/gorm_repository.go
 # path: internal/adapters/repository/auth/gorm_repository.go | lang: go | tokens: 1288 | size: 5153
 # functions: NewGormRepository, toModel, toDomain, toEvModel, toEvDomain
 BEGIN_FILE:internal/adapters/repository/auth/gorm_repository.go
@@ -9469,6 +9802,200 @@ func toEvDomain(m *models.EmailVerification) *domain.EmailVerification {
 }
 
 END_FILE:internal/adapters/repository/auth/gorm_repository.go
+# path: internal/adapters/repository/auth/redis_repository.go | lang: go | tokens: 1288 | size: 5152
+# functions: NewRedisRepository
+BEGIN_FILE:internal/adapters/repository/auth/redis_repository.go
+package auth
+
+import (
+	"context"
+	"errors"
+	"strconv"
+	"strings"
+	"time"
+
+	domain "server/internal/domain/auth"
+
+	"github.com/redis/go-redis/v9"
+)
+
+type redisRepository struct {
+	client   *redis.Client
+	gormRepo domain.Repository
+}
+
+func NewRedisRepository(client *redis.Client, gormRepo domain.Repository) domain.Repository {
+	return &redisRepository{
+		client:   client,
+		gormRepo: gormRepo,
+	}
+}
+
+// Delegate non-token methods directly to GORM repository
+func (r *redisRepository) Create(ctx context.Context, user *domain.User) error {
+	return r.gormRepo.Create(ctx, user)
+}
+
+func (r *redisRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
+	return r.gormRepo.GetByEmail(ctx, email)
+}
+
+func (r *redisRepository) GetByPhoneNumber(ctx context.Context, phone string) (*domain.User, error) {
+	return r.gormRepo.GetByPhoneNumber(ctx, phone)
+}
+
+func (r *redisRepository) GetByID(ctx context.Context, id uint) (*domain.User, error) {
+	return r.gormRepo.GetByID(ctx, id)
+}
+
+func (r *redisRepository) Update(ctx context.Context, user *domain.User) error {
+	return r.gormRepo.Update(ctx, user)
+}
+
+func (r *redisRepository) CreateEmailVerification(ctx context.Context, ev *domain.EmailVerification) error {
+	return r.gormRepo.CreateEmailVerification(ctx, ev)
+}
+
+func (r *redisRepository) GetEmailVerificationByToken(ctx context.Context, token string) (*domain.EmailVerification, error) {
+	return r.gormRepo.GetEmailVerificationByToken(ctx, token)
+}
+
+func (r *redisRepository) GetActiveEmailVerificationByUserID(ctx context.Context, userID uint) (*domain.EmailVerification, error) {
+	return r.gormRepo.GetActiveEmailVerificationByUserID(ctx, userID)
+}
+
+func (r *redisRepository) UpdateEmailVerification(ctx context.Context, ev *domain.EmailVerification) error {
+	return r.gormRepo.UpdateEmailVerification(ctx, ev)
+}
+
+// Token methods implemented using Redis
+func (r *redisRepository) SaveRefreshToken(ctx context.Context, token *domain.RefreshToken) error {
+	key := "refresh:" + token.TokenHash
+	userIDStr := strconv.FormatUint(uint64(token.UserID), 10)
+	ttl := time.Until(time.Unix(token.ExpiresAt, 0))
+
+	if ttl <= 0 {
+		return errors.New("token has already expired")
+	}
+
+	// Set the refresh token key mapping to the userID string
+	if err := r.client.Set(ctx, key, userIDStr, ttl).Err(); err != nil {
+		return err
+	}
+
+	// SAdd the tokenHash to the user's tracking set so we can revoke all later if needed
+	userSetKey := "user_tokens:" + userIDStr
+	if err := r.client.SAdd(ctx, userSetKey, token.TokenHash).Err(); err != nil {
+		return err
+	}
+
+	// Expire the user's tracking set after 30 days of inactivity to prevent memory leakage
+	_ = r.client.Expire(ctx, userSetKey, 30*24*time.Hour)
+
+	return nil
+}
+
+func (r *redisRepository) GetRefreshToken(ctx context.Context, tokenHash string) (*domain.RefreshToken, error) {
+	key := "refresh:" + tokenHash
+	val, err := r.client.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return nil, errors.New("invalid or expired refresh token")
+	} else if err != nil {
+		return nil, err
+	}
+
+	ttl, err := r.client.TTL(ctx, key).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	// TTL of -2 means the key doesn't exist, TTL of -1 means no expiry.
+	// Normally ttl should be positive. Let's calculate expiresAt.
+	expiresAt := time.Now().Add(ttl).Unix()
+
+	if strings.HasPrefix(val, "revoked:") {
+		userIDStr := strings.TrimPrefix(val, "revoked:")
+		userID, parseErr := strconv.ParseUint(userIDStr, 10, 64)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		return &domain.RefreshToken{
+			UserID:    uint(userID),
+			TokenHash: tokenHash,
+			ExpiresAt: expiresAt,
+			Revoked:   true,
+		}, nil
+	}
+
+	userID, parseErr := strconv.ParseUint(val, 10, 64)
+	if parseErr != nil {
+		return nil, parseErr
+	}
+
+	return &domain.RefreshToken{
+		UserID:    uint(userID),
+		TokenHash: tokenHash,
+		ExpiresAt: expiresAt,
+		Revoked:   false,
+	}, nil
+}
+
+func (r *redisRepository) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
+	key := "refresh:" + tokenHash
+	val, err := r.client.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	ttl, err := r.client.TTL(ctx, key).Result()
+	if err != nil || ttl <= 0 {
+		return err
+	}
+
+	if !strings.HasPrefix(val, "revoked:") {
+		revVal := "revoked:" + val
+		return r.client.Set(ctx, key, revVal, ttl).Err()
+	}
+
+	return nil
+}
+
+func (r *redisRepository) RevokeAllUserRefreshTokens(ctx context.Context, userID uint) error {
+	userIDStr := strconv.FormatUint(uint64(userID), 10)
+	userSetKey := "user_tokens:" + userIDStr
+
+	hashes, err := r.client.SMembers(ctx, userSetKey).Result()
+	if err != nil {
+		return err
+	}
+
+	for _, hash := range hashes {
+		key := "refresh:" + hash
+		val, err := r.client.Get(ctx, key).Result()
+		if err == redis.Nil {
+			continue
+		} else if err != nil {
+			return err
+		}
+
+		ttl, err := r.client.TTL(ctx, key).Result()
+		if err != nil || ttl <= 0 {
+			continue
+		}
+
+		if !strings.HasPrefix(val, "revoked:") {
+			revVal := "revoked:" + val
+			if setErr := r.client.Set(ctx, key, revVal, ttl).Err(); setErr != nil {
+				return setErr
+			}
+		}
+	}
+
+	return r.client.Del(ctx, userSetKey).Err()
+}
+END_FILE:internal/adapters/repository/auth/redis_repository.go
 # path: internal/adapters/repository/calendar/gorm_repository.go | lang: go | tokens: 1239 | size: 4959
 # functions: NewGormRepository
 BEGIN_FILE:internal/adapters/repository/calendar/gorm_repository.go
@@ -11497,180 +12024,6 @@ func toDomain(m *models.EmployeeInvite) *domain.EmployeeInvite {
 	}
 }
 END_FILE:internal/adapters/repository/invites/gorm_repository.go
-# path: internal/adapters/repository/leave/gorm_repository.go | lang: go | tokens: 1049 | size: 4199
-# functions: NewGormRepository, toModel, toDomain
-BEGIN_FILE:internal/adapters/repository/leave/gorm_repository.go
-package leave
-
-import (
-	"context"
-	"server/internal/domain/leave"
-	"server/internal/platform/database/models"
-	"time"
-
-	"gorm.io/gorm"
-)
-
-type gormRepository struct {
-	db *gorm.DB
-}
-
-func NewGormRepository(db *gorm.DB) leave.Repository {
-	return &gormRepository{db: db}
-}
-
-func (r *gormRepository) Create(ctx context.Context, l *leave.Leave) error {
-	model := toModel(l)
-	if err := r.db.WithContext(ctx).Create(model).Error; err != nil {
-		return err
-	}
-	l.ID = model.ID
-	l.CreatedAt = model.CreatedAt
-	l.UpdatedAt = model.UpdatedAt
-	return nil
-}
-
-func (r *gormRepository) GetByID(ctx context.Context, id uint) (*leave.Leave, error) {
-	var model models.Leave
-	if err := r.db.WithContext(ctx).Preload("Employee").Preload("Manager").First(&model, id).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return toDomain(&model), nil
-}
-
-func (r *gormRepository) GetByEmployee(ctx context.Context, employeeID uint, offset int) ([]leave.Leave, error) {
-	var modelsList []models.Leave
-	if err := r.db.WithContext(ctx).
-		Where("employee_id = ?", employeeID).
-		Order("created_at DESC").
-		Limit(20).
-		Offset(offset * 20).
-		Preload("Employee").
-		Find(&modelsList).Error; err != nil {
-		return nil, err
-	}
-
-	leaves := make([]leave.Leave, len(modelsList))
-	for i, m := range modelsList {
-		leaves[i] = *toDomain(&m)
-	}
-	return leaves, nil
-}
-
-func (r *gormRepository) GetByOrganisation(ctx context.Context, orgID uint, status string, offset int) ([]leave.Leave, error) {
-	query := r.db.WithContext(ctx).Where("organisation_id = ?", orgID)
-	if status != "" {
-		query = query.Where("status = ?", status)
-	}
-
-	var modelsList []models.Leave
-	if err := query.
-		Order("created_at DESC").
-		Limit(20).
-		Offset(offset * 20).
-		Preload("Employee").
-		Find(&modelsList).Error; err != nil {
-		return nil, err
-	}
-
-	leaves := make([]leave.Leave, len(modelsList))
-	for i, m := range modelsList {
-		leaves[i] = *toDomain(&m)
-	}
-	return leaves, nil
-}
-
-func (r *gormRepository) GetHistoryByEmployee(ctx context.Context, employeeID uint, status string, from *time.Time, to *time.Time, limit int, offset int) ([]leave.Leave, error) {
-	query := r.db.WithContext(ctx).Where("employee_id = ?", employeeID)
-
-	if status != "" {
-		query = query.Where("status = ?", status)
-	}
-
-	if from != nil {
-		query = query.Where("start_date >= ?", *from)
-	}
-	if to != nil {
-		query = query.Where("end_date <= ?", *to)
-	}
-
-	if limit > 0 {
-		query = query.Limit(limit)
-	}
-
-	var modelsList []models.Leave
-	if err := query.
-		Order("created_at DESC").
-		Offset(offset).
-		Find(&modelsList).Error; err != nil {
-		return nil, err
-	}
-
-	leaves := make([]leave.Leave, len(modelsList))
-	for i, m := range modelsList {
-		leaves[i] = *toDomain(&m)
-	}
-	return leaves, nil
-}
-
-func (r *gormRepository) Update(ctx context.Context, l *leave.Leave) error {
-	model := toModel(l)
-	return r.db.WithContext(ctx).Model(&models.Leave{}).Where("id = ?", l.ID).Save(model).Error
-}
-
-func (r *gormRepository) Delete(ctx context.Context, id uint) error {
-	return r.db.WithContext(ctx).Delete(&models.Leave{}, id).Error
-}
-
-func toModel(l *leave.Leave) *models.Leave {
-	var managerID *uint
-	if l.ManagerID != 0 {
-		managerID = &l.ManagerID
-	}
-	return &models.Leave{
-		Model: gorm.Model{
-			ID:        l.ID,
-			CreatedAt: l.CreatedAt,
-			UpdatedAt: l.UpdatedAt,
-		},
-		EmployeeID:     l.EmployeeID,
-		OrganisationID: l.OrganisationID,
-		ManagerID:      managerID,
-		LeaveType:      l.LeaveType,
-		StartDate:      l.StartDate,
-		EndDate:        l.EndDate,
-		TotalDays:      l.TotalDays,
-		Reason:         l.Reason,
-		Status:         l.Status,
-		ManagerNote:    l.ManagerNote,
-	}
-}
-
-func toDomain(m *models.Leave) *leave.Leave {
-	var managerID uint
-	if m.ManagerID != nil {
-		managerID = *m.ManagerID
-	}
-	return &leave.Leave{
-		ID:             m.ID,
-		EmployeeID:     m.EmployeeID,
-		OrganisationID: m.OrganisationID,
-		ManagerID:      managerID,
-		LeaveType:      m.LeaveType,
-		StartDate:      m.StartDate,
-		EndDate:        m.EndDate,
-		TotalDays:      m.TotalDays,
-		Reason:         m.Reason,
-		Status:         m.Status,
-		ManagerNote:    m.ManagerNote,
-		CreatedAt:      m.CreatedAt,
-		UpdatedAt:      m.UpdatedAt,
-	}
-}
-END_FILE:internal/adapters/repository/leave/gorm_repository.go
 # path: internal/adapters/http/callstate/handler.go | lang: go | tokens: 1005 | size: 4022
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/callstate/handler.go
@@ -13540,7 +13893,7 @@ type CallState struct {
 	Offer            *string    `gorm:"type:text" json:"offer"`
 }
 END_FILE:internal/platform/database/models/chat_models.go
-# path: internal/domain/settings/entity.go | lang: go | tokens: 698 | size: 2793
+# path: internal/domain/settings/entity.go | lang: go | tokens: 709 | size: 2836
 BEGIN_FILE:internal/domain/settings/entity.go
 package settings
 
@@ -13621,6 +13974,7 @@ type UserProfile struct {
 	City        string    `json:"city"`
 	Country     string    `json:"country"`
 	DateOfBirth time.Time `json:"date_of_birth"`
+	ProfilePic  string    `json:"profile_id"`
 }
 
 type NotificationPreferenceEntry struct {
@@ -15504,6 +15858,90 @@ type ResearchEntry struct {
 	Collaborators []ResearchCollaborator `gorm:"foreignKey:ResearchID" json:"collaborators"`
 }
 END_FILE:internal/platform/database/models/research_model.go
+# path: internal/platform/websocket/redis_broadcaster.go | lang: go | tokens: 476 | size: 1906
+# functions: NewRedisBroadcaster, StartSubscriber
+BEGIN_FILE:internal/platform/websocket/redis_broadcaster.go
+package websocket
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"server/internal/domain/notifications"
+
+	"github.com/redis/go-redis/v9"
+)
+
+type RedisBroadcaster struct {
+	hub         *Hub
+	redisClient *redis.Client
+	channel     string
+}
+
+func NewRedisBroadcaster(hub *Hub, redisClient *redis.Client, channel string) notifications.Broadcaster {
+	return &RedisBroadcaster{
+		hub:         hub,
+		redisClient: redisClient,
+		channel:     channel,
+	}
+}
+
+func (b *RedisBroadcaster) BroadcastNotification(ctx context.Context, n *notifications.Notification) error {
+	payload, err := json.Marshal(n)
+	if err != nil {
+		log.Printf("Error marshaling notification for pub/sub: %v", err)
+		return err
+	}
+
+	// Publish message to Redis pub/sub channel
+	err = b.redisClient.Publish(ctx, b.channel, payload).Err()
+	if err != nil {
+		log.Printf("Error publishing notification to Redis: %v", err)
+		return err
+	}
+
+	return nil
+}
+
+func StartSubscriber(ctx context.Context, redisClient *redis.Client, channel string, hub *Hub) {
+	pubsub := redisClient.Subscribe(ctx, channel)
+
+	// Clean up pubsub subscription when context is cancelled
+	go func() {
+		<-ctx.Done()
+		pubsub.Close()
+	}()
+
+	ch := pubsub.Channel()
+	log.Printf("Started Redis Pub/Sub subscriber on channel: %s", channel)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Stopping Redis Pub/Sub subscriber on channel %s due to context cancellation", channel)
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				log.Printf("Redis Pub/Sub channel %s closed", channel)
+				return
+			}
+
+			var n notifications.Notification
+			if err := json.Unmarshal([]byte(msg.Payload), &n); err != nil {
+				log.Printf("Error unmarshaling Redis pub/sub message: %v", err)
+				continue
+			}
+
+			// Broadcast to the local WebSocket connections
+			hub.Broadcast <- &HubMessage{
+				TargetUserID: fmt.Sprintf("%d", n.UserID),
+				Payload:      []byte(msg.Payload),
+			}
+		}
+	}
+}
+END_FILE:internal/platform/websocket/redis_broadcaster.go
 # path: internal/platform/websocket/manager.go | lang: go | tokens: 463 | size: 1855
 # functions: NewManager
 BEGIN_FILE:internal/platform/websocket/manager.go
@@ -16255,6 +16693,73 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/settings/routes.go
+# path: internal/adapters/http/files/handler.go | lang: go | tokens: 359 | size: 1436
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/files/handler.go
+package files
+
+import (
+	"io"
+	"net/http"
+	domain "server/internal/domain/files"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) UploadFile(c *gin.Context) {
+	file, _, err := c.Request.FormFile("data")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer file.Close()
+
+	imageData, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	fileDomain := &domain.File{
+		FileName: c.PostForm("file_name"),
+		FileType: c.PostForm("file_type"),
+		FileSize: int64(len(imageData)),
+		Data:     imageData,
+	}
+
+	if err := h.uc.UploadFile(c.Request.Context(), fileDomain); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "file_id": fileDomain.ID, "url": fileDomain.URL})
+}
+
+func (h *Handler) GetFile(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+		return
+	}
+
+	file, err := h.uc.GetFile(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	c.Redirect(http.StatusFound, file.URL)
+}
+END_FILE:internal/adapters/http/files/handler.go
 # path: internal/usecase/notifications/usecase.go | lang: go | tokens: 355 | size: 1421
 # functions: NewService
 BEGIN_FILE:internal/usecase/notifications/usecase.go
@@ -16351,73 +16856,6 @@ type SearchFilters struct {
 	Offset int
 }
 END_FILE:internal/domain/search/entity.go
-# path: internal/adapters/http/files/handler.go | lang: go | tokens: 353 | size: 1413
-# functions: NewHandler
-BEGIN_FILE:internal/adapters/http/files/handler.go
-package files
-
-import (
-	"io"
-	"net/http"
-	domain "server/internal/domain/files"
-	"strconv"
-
-	"github.com/gin-gonic/gin"
-)
-
-type Handler struct {
-	uc domain.UseCase
-}
-
-func NewHandler(uc domain.UseCase) *Handler {
-	return &Handler{uc: uc}
-}
-
-func (h *Handler) UploadFile(c *gin.Context) {
-	file, _, err := c.Request.FormFile("data")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	defer file.Close()
-
-	imageData, err := io.ReadAll(file)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	fileDomain := &domain.File{
-		FileName: c.PostForm("file_name"),
-		FileType: c.PostForm("file_type"),
-		FileSize: int64(len(imageData)),
-		Data:     imageData,
-	}
-
-	if err := h.uc.UploadFile(c.Request.Context(), fileDomain); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file", "message": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "file_id": fileDomain.ID})
-}
-
-func (h *Handler) GetFile(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
-		return
-	}
-
-	file, err := h.uc.GetFile(c.Request.Context(), uint(id))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
-		return
-	}
-
-	c.Redirect(http.StatusFound, file.URL)
-}
-END_FILE:internal/adapters/http/files/handler.go
 # path: internal/usecase/settings/usecase_test.go | lang: go | tokens: 352 | size: 1409
 # functions: TestGetOrgSettings_AccessControl
 BEGIN_FILE:internal/usecase/settings/usecase_test.go
@@ -16581,6 +17019,40 @@ func (h *Handler) Upgrade(c *gin.Context) {
 	go client.ReadPump()
 }
 END_FILE:internal/adapters/http/notifications/ws_handler.go
+# path: internal/domain/tasks/entity.go | lang: go | tokens: 335 | size: 1340
+BEGIN_FILE:internal/domain/tasks/entity.go
+package tasks
+
+import (
+	authDomain "server/internal/domain/auth"
+	orgDomain "server/internal/domain/organisation"
+	projectDomain "server/internal/domain/projects"
+	teamDomain "server/internal/domain/teams"
+	"time"
+)
+
+type Task struct {
+	ID             uint                   `json:"id"`
+	Title          string                 `json:"title"`
+	Description    string                 `json:"description"`
+	DueDate        time.Time              `json:"due_date"`
+	AssignedTo     uint                   `json:"assigned_to"`
+	AssignedUser   *authDomain.User       `json:"assigned_user"`
+	AssignedBy     uint                   `json:"assigned_by"`
+	AssignedByUser *authDomain.User       `json:"assigned_by_user"`
+	Type           string                 `json:"type"`
+	Priority       string                 `json:"priority"`
+	Status         string                 `json:"status"`
+	OrganisationID uint                   `json:"organisation_id"`
+	Organisation   *orgDomain.Entity      `json:"organisation"`
+	IsPersonal     bool                   `json:"is_personal"`
+	TeamID         *uint                  `json:"team_id"`
+	Team           *teamDomain.Team       `json:"team"`
+	ProjectID      *uint                  `json:"project_id"`
+	Project        *projectDomain.Project `json:"project"`
+	CreatedAt      time.Time              `json:"CreatedAt"`
+}
+END_FILE:internal/domain/tasks/entity.go
 # path: .github/workflows/deploy.yml | lang: yaml | tokens: 335 | size: 1341
 BEGIN_FILE:.github/workflows/deploy.yml
 name: Deploy Backend
@@ -16646,40 +17118,37 @@ jobs:
             docker compose up -d backend
           "
 END_FILE:.github/workflows/deploy.yml
-# path: internal/domain/tasks/entity.go | lang: go | tokens: 335 | size: 1340
-BEGIN_FILE:internal/domain/tasks/entity.go
-package tasks
+# path: internal/platform/database/models/task_model.go | lang: go | tokens: 330 | size: 1322
+BEGIN_FILE:internal/platform/database/models/task_model.go
+package models
 
 import (
-	authDomain "server/internal/domain/auth"
-	orgDomain "server/internal/domain/organisation"
-	projectDomain "server/internal/domain/projects"
-	teamDomain "server/internal/domain/teams"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 type Task struct {
-	ID             uint                   `json:"id"`
-	Title          string                 `json:"title"`
-	Description    string                 `json:"description"`
-	DueDate        time.Time              `json:"due_date"`
-	AssignedTo     uint                   `json:"assigned_to"`
-	AssignedUser   *authDomain.User       `json:"assigned_user"`
-	AssignedBy     uint                   `json:"assigned_by"`
-	AssignedByUser *authDomain.User       `json:"assigned_by_user"`
-	Type           string                 `json:"type"`
-	Priority       string                 `json:"priority"`
-	Status         string                 `json:"status"`
-	OrganisationID uint                   `json:"organisation_id"`
-	Organisation   *orgDomain.Entity      `json:"organisation"`
-	IsPersonal     bool                   `json:"is_personal"`
-	TeamID         *uint                  `json:"team_id"`
-	Team           *teamDomain.Team       `json:"team"`
-	ProjectID      *uint                  `json:"project_id"`
-	Project        *projectDomain.Project `json:"project"`
-	CreatedAt      time.Time              `json:"CreatedAt"`
+	gorm.Model
+	Title          string        `gorm:"size:255;not null" json:"title"`
+	Description    string        `gorm:"type:text" json:"description"`
+	DueDate        time.Time     `json:"due_date"`
+	AssignedTo     uint          `json:"assigned_to"`
+	AssignedUser   *UserModel    `gorm:"foreignKey:AssignedTo;references:ID" json:"assigned_user"`
+	AssignedBy     uint          `json:"assigned_by"`
+	AssignedByUser *UserModel    `gorm:"foreignKey:AssignedBy;references:ID" json:"assigned_by_user"`
+	Type           string        `gorm:"size:100" json:"type"`
+	Priority       string        `gorm:"size:100" json:"priority"`
+	Status         string        `gorm:"size:50" json:"status"`
+	OrganisationID uint          `gorm:"index" json:"organisation_id"`
+	Organisation   *Organisation `gorm:"foreignKey:OrganisationID" json:"organisation"`
+	IsPersonal     bool          `gorm:"default:false" json:"is_personal"`
+	TeamID         *uint         `gorm:"index" json:"team_id"` // Pointer for nullable
+	Team           *Team         `gorm:"foreignKey:TeamID" json:"team"`
+	ProjectID      *uint         `gorm:"index" json:"project_id"` // Pointer for nullable
+	Project        *Project      `gorm:"foreignKey:ProjectID" json:"project"`
 }
-END_FILE:internal/domain/tasks/entity.go
+END_FILE:internal/platform/database/models/task_model.go
 # path: internal/domain/settings/repository.go | lang: go | tokens: 330 | size: 1321
 BEGIN_FILE:internal/domain/settings/repository.go
 package settings
@@ -16716,37 +17185,6 @@ type Repository interface {
 	ExportOrgData(orgID uint) (string, error)
 }
 END_FILE:internal/domain/settings/repository.go
-# path: internal/platform/database/models/task_model.go | lang: go | tokens: 330 | size: 1322
-BEGIN_FILE:internal/platform/database/models/task_model.go
-package models
-
-import (
-	"time"
-
-	"gorm.io/gorm"
-)
-
-type Task struct {
-	gorm.Model
-	Title          string        `gorm:"size:255;not null" json:"title"`
-	Description    string        `gorm:"type:text" json:"description"`
-	DueDate        time.Time     `json:"due_date"`
-	AssignedTo     uint          `json:"assigned_to"`
-	AssignedUser   *UserModel    `gorm:"foreignKey:AssignedTo;references:ID" json:"assigned_user"`
-	AssignedBy     uint          `json:"assigned_by"`
-	AssignedByUser *UserModel    `gorm:"foreignKey:AssignedBy;references:ID" json:"assigned_by_user"`
-	Type           string        `gorm:"size:100" json:"type"`
-	Priority       string        `gorm:"size:100" json:"priority"`
-	Status         string        `gorm:"size:50" json:"status"`
-	OrganisationID uint          `gorm:"index" json:"organisation_id"`
-	Organisation   *Organisation `gorm:"foreignKey:OrganisationID" json:"organisation"`
-	IsPersonal     bool          `gorm:"default:false" json:"is_personal"`
-	TeamID         *uint         `gorm:"index" json:"team_id"` // Pointer for nullable
-	Team           *Team         `gorm:"foreignKey:TeamID" json:"team"`
-	ProjectID      *uint         `gorm:"index" json:"project_id"` // Pointer for nullable
-	Project        *Project      `gorm:"foreignKey:ProjectID" json:"project"`
-}
-END_FILE:internal/platform/database/models/task_model.go
 # path: internal/usecase/task_attachments/usecase.go | lang: go | tokens: 316 | size: 1267
 # functions: NewService
 BEGIN_FILE:internal/usecase/task_attachments/usecase.go
@@ -17412,6 +17850,49 @@ type AttendanceHistory struct {
 	Summary AttendanceSummary `json:"summary"`
 }
 END_FILE:internal/domain/attendance/entity.go
+# path: cmd/server/main.go | lang: go | tokens: 239 | size: 959
+# functions: init, main
+BEGIN_FILE:cmd/server/main.go
+package main
+
+import (
+	"server/internal/app/routes"
+	"server/internal/platform/cloudinary"
+	"server/internal/platform/database"
+	"server/internal/platform/redis"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+)
+
+func init() {
+	godotenv.Load(".env")
+	database.Init()
+	redis.Init()
+	cloudinary.Init()
+}
+
+func main() {
+	// Perform database migrations
+	if err := database.PerformMigrations(); err != nil {
+		panic("Failed to perform database migrations: " + err.Error())
+	}
+	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowOriginFunc: func(origin string) bool {
+			return true
+		},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length", "Authorization"},
+		AllowCredentials: true,
+	}))
+	routes.SetupRoutes(r)
+
+	r.Run(":8000")
+}
+END_FILE:cmd/server/main.go
 # path: internal/usecase/organisation/usecase.go | lang: go | tokens: 234 | size: 936
 # functions: NewService
 BEGIN_FILE:internal/usecase/organisation/usecase.go
@@ -17611,47 +18092,6 @@ type Repository interface {
 	GetParticipants(ctx context.Context, chatID uint) ([]ChatParticipant, error)
 }
 END_FILE:internal/domain/chats/repository.go
-# path: cmd/server/main.go | lang: go | tokens: 227 | size: 909
-# functions: init, main
-BEGIN_FILE:cmd/server/main.go
-package main
-
-import (
-	"server/internal/app/routes"
-	"server/internal/platform/cloudinary"
-	"server/internal/platform/database"
-
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
-)
-
-func init() {
-	godotenv.Load(".env")
-	database.Init()
-	cloudinary.Init()
-}
-
-func main() {
-	// Perform database migrations
-	if err := database.PerformMigrations(); err != nil {
-		panic("Failed to perform database migrations: " + err.Error())
-	}
-	r := gin.Default()
-	r.Use(cors.New(cors.Config{
-		AllowOriginFunc: func(origin string) bool {
-			return true
-		},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length", "Authorization"},
-		AllowCredentials: true,
-	}))
-	routes.SetupRoutes(r)
-
-	r.Run(":8000")
-}
-END_FILE:cmd/server/main.go
 # path: internal/domain/auth/usecase.go | lang: go | tokens: 222 | size: 890
 # imports: context
 BEGIN_FILE:internal/domain/auth/usecase.go
@@ -17749,6 +18189,98 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/employees/routes.go
+# path: internal/platform/middlewares/rate_limiter_middleware.go | lang: go | tokens: 209 | size: 836
+# functions: RateLimiter
+BEGIN_FILE:internal/platform/middlewares/rate_limiter_middleware.go
+package middlewares
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
+)
+
+func RateLimiter(redisClient *redis.Client, limit int, window time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx := c.Request.Context()
+		ip := c.ClientIP()
+		key := "ratelimit:" + ip
+
+		count, err := redisClient.Incr(ctx, key).Result()
+		if err != nil {
+			// Fail open or log error? Standard pattern is log & fail open or return 500.
+			// Let's log it and proceed so that Redis downtime doesn't block users.
+			c.Next()
+			return
+		}
+
+		if count == 1 {
+			// First request in the window, set the TTL
+			_ = redisClient.Expire(ctx, key, window).Err()
+		}
+
+		if int(count) > limit {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many requests"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+END_FILE:internal/platform/middlewares/rate_limiter_middleware.go
+# path: internal/platform/redis/init.go | lang: go | tokens: 194 | size: 777
+# functions: Init
+BEGIN_FILE:internal/platform/redis/init.go
+package redis
+
+import (
+	"context"
+	"log"
+	"os"
+	"strconv"
+
+	"github.com/redis/go-redis/v9"
+)
+
+var Client *redis.Client
+
+func Init() {
+	addr := os.Getenv("REDIS_ADDR")
+	password := os.Getenv("REDIS_PASSWORD")
+	dbStr := os.Getenv("REDIS_DB")
+
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+
+	db := 0
+	if dbStr != "" {
+		var err error
+		db, err = strconv.Atoi(dbStr)
+		if err != nil {
+			log.Fatalf("Invalid REDIS_DB configuration: %v", err)
+		}
+	}
+
+	Client = redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Password: password,
+		DB:       db,
+	})
+
+	// Ping check
+	ctx := context.Background()
+	_, err := Client.Ping(ctx).Result()
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis at %s: %v", addr, err)
+	}
+
+	log.Printf("Connected to Redis successfully at %s", addr)
+}
+END_FILE:internal/platform/redis/init.go
 # path: internal/domain/projects/usecase.go | lang: go | tokens: 193 | size: 775
 # imports: context
 BEGIN_FILE:internal/domain/projects/usecase.go
@@ -17795,6 +18327,27 @@ func (s *service) CreateOffer(ctx context.Context, id uint, callingID, firstName
 }
 func (s *service) EndCall(ctx context.Context, id uint) error { return s.repo.EndCall(ctx, id) }
 END_FILE:internal/usecase/callstate/usecase.go
+# path: internal/domain/projects/repository.go | lang: go | tokens: 182 | size: 730
+# imports: context
+BEGIN_FILE:internal/domain/projects/repository.go
+package projects
+
+import "context"
+
+type Repository interface {
+	Create(ctx context.Context, project *Project) error
+	GetByID(ctx context.Context, id uint) (*Project, error)
+	Update(ctx context.Context, project *Project) error
+	Delete(ctx context.Context, id uint) error
+	GetByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
+	GetByTeam(ctx context.Context, teamID uint) ([]Project, error)
+	GetWithLessData(ctx context.Context, orgID uint) ([]Project, error)
+	CreateMilestone(ctx context.Context, milestone *Milestone) error
+	UpdateMilestone(ctx context.Context, milestone *Milestone) error
+	DeleteMilestone(ctx context.Context, id uint) error
+	GetMilestoneByID(ctx context.Context, id uint) (*Milestone, error)
+}
+END_FILE:internal/domain/projects/repository.go
 # path: internal/domain/employees/repository.go | lang: go | tokens: 182 | size: 731
 # imports: context
 BEGIN_FILE:internal/domain/employees/repository.go
@@ -17818,27 +18371,6 @@ type Repository interface {
 	GetBossByUserID(ctx context.Context, userID uint) (*Boss, error)
 }
 END_FILE:internal/domain/employees/repository.go
-# path: internal/domain/projects/repository.go | lang: go | tokens: 182 | size: 730
-# imports: context
-BEGIN_FILE:internal/domain/projects/repository.go
-package projects
-
-import "context"
-
-type Repository interface {
-	Create(ctx context.Context, project *Project) error
-	GetByID(ctx context.Context, id uint) (*Project, error)
-	Update(ctx context.Context, project *Project) error
-	Delete(ctx context.Context, id uint) error
-	GetByOrganisation(ctx context.Context, orgID uint) ([]Project, error)
-	GetByTeam(ctx context.Context, teamID uint) ([]Project, error)
-	GetWithLessData(ctx context.Context, orgID uint) ([]Project, error)
-	CreateMilestone(ctx context.Context, milestone *Milestone) error
-	UpdateMilestone(ctx context.Context, milestone *Milestone) error
-	DeleteMilestone(ctx context.Context, id uint) error
-	GetMilestoneByID(ctx context.Context, id uint) (*Milestone, error)
-}
-END_FILE:internal/domain/projects/repository.go
 # path: internal/usecase/search/usecase.go | lang: go | tokens: 178 | size: 715
 # functions: NewService
 BEGIN_FILE:internal/usecase/search/usecase.go
@@ -18012,6 +18544,31 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/leave/routes.go
+# path: internal/adapters/http/auth/routes.go | lang: go | tokens: 164 | size: 656
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/auth/routes.go
+package auth
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc, rateLimiter gin.HandlerFunc) {
+	r.POST("/api/v1/auth/signup", rateLimiter, h.SignUp)
+	r.POST("/api/v1/auth/signin", rateLimiter, h.SignIn)
+	r.GET("/api/v1/auth/verify-email", h.VerifyEmail)
+	r.POST("/api/v1/auth/refresh", h.RefreshToken)
+
+	authGroup := r.Group("/api/v1/auth")
+	authGroup.Use(validateToken)
+	{
+		authGroup.POST("/complete-signin", h.CompleteSignIn)
+		authGroup.GET("/validate-employee", h.ValidateEmployee)
+		authGroup.POST("/send-verification", h.SendVerificationEmail)
+		authGroup.GET("/me", h.GetMe)
+	}
+}
+END_FILE:internal/adapters/http/auth/routes.go
 # path: internal/adapters/http/tasks/routes.go | lang: go | tokens: 164 | size: 656
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/tasks/routes.go
@@ -18037,6 +18594,42 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/tasks/routes.go
+# path: internal/platform/websocket/notification_broadcaster.go | lang: go | tokens: 160 | size: 643
+# functions: NewBroadcaster
+BEGIN_FILE:internal/platform/websocket/notification_broadcaster.go
+package websocket
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"server/internal/domain/notifications"
+)
+
+type Broadcaster struct {
+	hub *Hub
+}
+
+func NewBroadcaster(hub *Hub) notifications.Broadcaster {
+	return &Broadcaster{hub: hub}
+}
+
+func (b *Broadcaster) BroadcastNotification(ctx context.Context, n *notifications.Notification) error {
+	message, err := json.Marshal(n)
+	if err != nil {
+		log.Printf("Error marshaling notification: %v", err)
+		return err
+	}
+
+	// Send to the specific user's websocket connections
+	b.hub.Broadcast <- &HubMessage{
+		TargetUserID: fmt.Sprintf("%d", n.UserID),
+		Payload:      message,
+	}
+	return nil
+}
+END_FILE:internal/platform/websocket/notification_broadcaster.go
 # path: internal/platform/database/models/onboarding_progress_model.go | lang: go | tokens: 160 | size: 642
 # imports: time
 BEGIN_FILE:internal/platform/database/models/onboarding_progress_model.go
@@ -18075,42 +18668,6 @@ type Repository interface {
 	GetByTitle(ctx context.Context, title string) ([]Task, error)
 }
 END_FILE:internal/domain/tasks/repository.go
-# path: internal/platform/websocket/notification_broadcaster.go | lang: go | tokens: 160 | size: 643
-# functions: NewBroadcaster
-BEGIN_FILE:internal/platform/websocket/notification_broadcaster.go
-package websocket
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"server/internal/domain/notifications"
-)
-
-type Broadcaster struct {
-	hub *Hub
-}
-
-func NewBroadcaster(hub *Hub) notifications.Broadcaster {
-	return &Broadcaster{hub: hub}
-}
-
-func (b *Broadcaster) BroadcastNotification(ctx context.Context, n *notifications.Notification) error {
-	message, err := json.Marshal(n)
-	if err != nil {
-		log.Printf("Error marshaling notification: %v", err)
-		return err
-	}
-
-	// Send to the specific user's websocket connections
-	b.hub.Broadcast <- &HubMessage{
-		TargetUserID: fmt.Sprintf("%d", n.UserID),
-		Payload:      message,
-	}
-	return nil
-}
-END_FILE:internal/platform/websocket/notification_broadcaster.go
 # path: internal/adapters/http/calls/handler.go | lang: go | tokens: 155 | size: 621
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/calls/handler.go
@@ -18194,31 +18751,6 @@ func (s *service) GetOrgEmployeeMonitor(ctx context.Context, orgID uint) ([]anal
 	return s.repo.GetOrgEmployeeMonitor(ctx, orgID)
 }
 END_FILE:internal/usecase/analytics/usecase.go
-# path: internal/adapters/http/auth/routes.go | lang: go | tokens: 150 | size: 601
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/auth/routes.go
-package auth
-
-import (
-	"github.com/gin-gonic/gin"
-)
-
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	r.POST("/api/v1/auth/signup", h.SignUp)
-	r.POST("/api/v1/auth/signin", h.SignIn)
-	r.GET("/api/v1/auth/verify-email", h.VerifyEmail)
-	r.POST("/api/v1/auth/refresh", h.RefreshToken)
-
-	authGroup := r.Group("/api/v1/auth")
-	authGroup.Use(validateToken)
-	{
-		authGroup.POST("/complete-signin", h.CompleteSignIn)
-		authGroup.GET("/validate-employee", h.ValidateEmployee)
-		authGroup.POST("/send-verification", h.SendVerificationEmail)
-		authGroup.GET("/me", h.GetMe)
-	}
-}
-END_FILE:internal/adapters/http/auth/routes.go
 # path: internal/domain/leave/repository.go | lang: go | tokens: 149 | size: 598
 BEGIN_FILE:internal/domain/leave/repository.go
 package leave
@@ -18477,25 +19009,6 @@ type Repository interface {
 	GetByID(ctx context.Context, attachmentID uint) (*TaskAttachment, error)
 }
 END_FILE:internal/domain/task_attachments/repository.go
-# path: internal/domain/notifications/entity.go | lang: go | tokens: 120 | size: 483
-# imports: time
-BEGIN_FILE:internal/domain/notifications/entity.go
-package notifications
-
-import "time"
-
-type Notification struct {
-	ID               uint      `json:"id"`
-	UserID           uint      `json:"user_id"`
-	OrganisationID   uint      `json:"organisation_id"`
-	Title            string    `json:"title"`
-	Message          string    `json:"message"`
-	IsRead           bool      `json:"is_read"`
-	NotificationType string    `json:"notification_type"`
-	Link             string    `json:"link"`
-	CreatedAt        time.Time `json:"created_at"`
-}
-END_FILE:internal/domain/notifications/entity.go
 # path: internal/platform/database/models/invite_model.go | lang: go | tokens: 120 | size: 481
 BEGIN_FILE:internal/platform/database/models/invite_model.go
 package models
@@ -18516,26 +19029,25 @@ type Invite struct {
 	Status         string    `gorm:"size:50;not null;default:'pending'"` // e.g. pending, accepted, expired
 }
 END_FILE:internal/platform/database/models/invite_model.go
-# path: internal/adapters/http/attendance/routes.go | lang: go | tokens: 119 | size: 479
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/attendance/routes.go
-package attendance
+# path: internal/domain/notifications/entity.go | lang: go | tokens: 120 | size: 483
+# imports: time
+BEGIN_FILE:internal/domain/notifications/entity.go
+package notifications
 
-import (
-	"github.com/gin-gonic/gin"
-)
+import "time"
 
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	attendanceGroup := r.Group("/api/v1/attendence")
-	attendanceGroup.Use(validateToken)
-	{
-		attendanceGroup.POST("/create", h.PostAttendance)
-		attendanceGroup.PUT("/:id", h.UpdateAttendance)
-		attendanceGroup.GET("/:id", h.GetAttendanceByDateAndUser)
-		attendanceGroup.GET("/employee/:userId/history", h.GetEmployeeAttendanceHistory)
-	}
+type Notification struct {
+	ID               uint      `json:"id"`
+	UserID           uint      `json:"user_id"`
+	OrganisationID   uint      `json:"organisation_id"`
+	Title            string    `json:"title"`
+	Message          string    `json:"message"`
+	IsRead           bool      `json:"is_read"`
+	NotificationType string    `json:"notification_type"`
+	Link             string    `json:"link"`
+	CreatedAt        time.Time `json:"created_at"`
 }
-END_FILE:internal/adapters/http/attendance/routes.go
+END_FILE:internal/domain/notifications/entity.go
 # path: internal/adapters/http/analytics/routes.go | lang: go | tokens: 119 | size: 477
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/analytics/routes.go
@@ -18556,6 +19068,26 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc, ro
 	}
 }
 END_FILE:internal/adapters/http/analytics/routes.go
+# path: internal/adapters/http/attendance/routes.go | lang: go | tokens: 119 | size: 479
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/attendance/routes.go
+package attendance
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	attendanceGroup := r.Group("/api/v1/attendence")
+	attendanceGroup.Use(validateToken)
+	{
+		attendanceGroup.POST("/create", h.PostAttendance)
+		attendanceGroup.PUT("/:id", h.UpdateAttendance)
+		attendanceGroup.GET("/:id", h.GetAttendanceByDateAndUser)
+		attendanceGroup.GET("/employee/:userId/history", h.GetEmployeeAttendanceHistory)
+	}
+}
+END_FILE:internal/adapters/http/attendance/routes.go
 # path: internal/domain/task_attachments/entity.go | lang: go | tokens: 118 | size: 473
 # imports: time
 BEGIN_FILE:internal/domain/task_attachments/entity.go
@@ -18726,6 +19258,22 @@ type NotificationPreference struct {
 	InApp    bool   `gorm:"default:true" json:"in_app"`
 }
 END_FILE:internal/platform/database/models/notification_preference_model.go
+# path: internal/domain/teams/usecase.go | lang: go | tokens: 103 | size: 414
+# imports: context
+BEGIN_FILE:internal/domain/teams/usecase.go
+package teams
+
+import "context"
+
+type UseCase interface {
+	CreateTeam(ctx context.Context, team *Team, members []uint) error
+	GetTeam(ctx context.Context, id uint) (*Team, []TeamMember, error)
+	UpdateTeam(ctx context.Context, team *Team) error
+	DeleteTeam(ctx context.Context, id uint) error
+	GetTeamsByOrganisation(ctx context.Context, orgID uint) ([]Team, error)
+	GetTeams(ctx context.Context) ([]Team, error)
+}
+END_FILE:internal/domain/teams/usecase.go
 # path: internal/platform/database/models/task_attachment_model.go | lang: go | tokens: 103 | size: 415
 BEGIN_FILE:internal/platform/database/models/task_attachment_model.go
 package models
@@ -18745,22 +19293,6 @@ type TaskAttachment struct {
 	UploadedByUser UserModel `gorm:"foreignKey:UploadedBy"`
 }
 END_FILE:internal/platform/database/models/task_attachment_model.go
-# path: internal/domain/teams/usecase.go | lang: go | tokens: 103 | size: 414
-# imports: context
-BEGIN_FILE:internal/domain/teams/usecase.go
-package teams
-
-import "context"
-
-type UseCase interface {
-	CreateTeam(ctx context.Context, team *Team, members []uint) error
-	GetTeam(ctx context.Context, id uint) (*Team, []TeamMember, error)
-	UpdateTeam(ctx context.Context, team *Team) error
-	DeleteTeam(ctx context.Context, id uint) error
-	GetTeamsByOrganisation(ctx context.Context, orgID uint) ([]Team, error)
-	GetTeams(ctx context.Context) ([]Team, error)
-}
-END_FILE:internal/domain/teams/usecase.go
 # path: internal/domain/chats/usecase.go | lang: go | tokens: 101 | size: 404
 # imports: context
 BEGIN_FILE:internal/domain/chats/usecase.go
@@ -18874,21 +19406,6 @@ type UseCase interface {
 	RemoveAttachment(ctx context.Context, attachmentID uint, requestingUserID uint) error
 }
 END_FILE:internal/domain/task_attachments/usecase.go
-# path: internal/domain/invites/usecase.go | lang: go | tokens: 86 | size: 347
-BEGIN_FILE:internal/domain/invites/usecase.go
-package invites
-
-import (
-	"context"
-	authDomain "server/internal/domain/auth"
-)
-
-type UseCase interface {
-	InviteEmployee(ctx context.Context, invite *EmployeeInvite) error
-	AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error)
-	GetInvitesByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
-}
-END_FILE:internal/domain/invites/usecase.go
 # path: internal/adapters/http/callstate/routes.go | lang: go | tokens: 86 | size: 344
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
@@ -18909,6 +19426,21 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/callstate/routes.go
+# path: internal/domain/invites/usecase.go | lang: go | tokens: 86 | size: 347
+BEGIN_FILE:internal/domain/invites/usecase.go
+package invites
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+)
+
+type UseCase interface {
+	InviteEmployee(ctx context.Context, invite *EmployeeInvite) error
+	AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error)
+	GetInvitesByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
+}
+END_FILE:internal/domain/invites/usecase.go
 # path: internal/adapters/http/messages/routes.go | lang: go | tokens: 85 | size: 340
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
@@ -18970,24 +19502,6 @@ type OnboardingProgress struct {
 	InviteSent       bool `json:"inviteSent"`
 }
 END_FILE:internal/domain/onboarding/entity.go
-# path: internal/adapters/http/onboarding/routes.go | lang: go | tokens: 79 | size: 316
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/onboarding/routes.go
-package onboarding
-
-import (
-	"github.com/gin-gonic/gin"
-)
-
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	group := r.Group("/api/v1/onboarding")
-	group.Use(validateToken)
-	{
-		group.GET("/:user_id", h.GetOnboardingProgress)
-		group.POST("/update", h.UpdateOnboardingProgress)
-	}
-}
-END_FILE:internal/adapters/http/onboarding/routes.go
 # path: internal/domain/callstate/repository.go | lang: go | tokens: 79 | size: 319
 # imports: context
 BEGIN_FILE:internal/domain/callstate/repository.go
@@ -19031,6 +19545,53 @@ type WorkSchedule struct {
 	ScheduleData   string `gorm:"type:text"`         // JSON or text describing work hours per day
 }
 END_FILE:internal/platform/database/models/work_schedule_model.go
+# path: internal/adapters/http/onboarding/routes.go | lang: go | tokens: 79 | size: 316
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/onboarding/routes.go
+package onboarding
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	group := r.Group("/api/v1/onboarding")
+	group.Use(validateToken)
+	{
+		group.GET("/:user_id", h.GetOnboardingProgress)
+		group.POST("/update", h.UpdateOnboardingProgress)
+	}
+}
+END_FILE:internal/adapters/http/onboarding/routes.go
+# path: internal/domain/callstate/usecase.go | lang: go | tokens: 78 | size: 312
+# imports: context
+BEGIN_FILE:internal/domain/callstate/usecase.go
+package callstate
+
+import "context"
+
+type UseCase interface {
+	CreateOrUpdate(ctx context.Context, state *State) error
+	Get(ctx context.Context, id uint) (*State, error)
+	CreateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
+	EndCall(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/callstate/usecase.go
+# path: internal/platform/database/models/role_permissions_model.go | lang: go | tokens: 78 | size: 312
+BEGIN_FILE:internal/platform/database/models/role_permissions_model.go
+package models
+
+import (
+	"gorm.io/gorm"
+)
+
+type RolePermissions struct {
+	gorm.Model
+	OrganisationID uint   `gorm:"index;not null"`
+	Role           string `gorm:"size:50;not null"` // e.g. "employee", "manager", "admin"
+	Permission     string `gorm:"size:100;not null"` // e.g. "read:employees", "write:tasks"
+}
+END_FILE:internal/platform/database/models/role_permissions_model.go
 # path: internal/platform/database/models/task_comment_model.go | lang: go | tokens: 78 | size: 313
 BEGIN_FILE:internal/platform/database/models/task_comment_model.go
 package models
@@ -19048,35 +19609,6 @@ type TaskComment struct {
 	User      UserModel `gorm:"foreignKey:UserID"`
 }
 END_FILE:internal/platform/database/models/task_comment_model.go
-# path: internal/platform/database/models/role_permissions_model.go | lang: go | tokens: 78 | size: 312
-BEGIN_FILE:internal/platform/database/models/role_permissions_model.go
-package models
-
-import (
-	"gorm.io/gorm"
-)
-
-type RolePermissions struct {
-	gorm.Model
-	OrganisationID uint   `gorm:"index;not null"`
-	Role           string `gorm:"size:50;not null"` // e.g. "employee", "manager", "admin"
-	Permission     string `gorm:"size:100;not null"` // e.g. "read:employees", "write:tasks"
-}
-END_FILE:internal/platform/database/models/role_permissions_model.go
-# path: internal/domain/callstate/usecase.go | lang: go | tokens: 78 | size: 312
-# imports: context
-BEGIN_FILE:internal/domain/callstate/usecase.go
-package callstate
-
-import "context"
-
-type UseCase interface {
-	CreateOrUpdate(ctx context.Context, state *State) error
-	Get(ctx context.Context, id uint) (*State, error)
-	CreateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
-	EndCall(ctx context.Context, id uint) error
-}
-END_FILE:internal/domain/callstate/usecase.go
 # path: internal/domain/task_comments/usecase.go | lang: go | tokens: 77 | size: 311
 BEGIN_FILE:internal/domain/task_comments/usecase.go
 package task_comments
@@ -19208,6 +19740,19 @@ type LeavePolicy struct {
 	Description    string `gorm:"type:text"`
 }
 END_FILE:internal/platform/database/models/leave_policy_model.go
+# path: internal/adapters/http/search/routes.go | lang: go | tokens: 61 | size: 247
+# imports: github.com/gin-gonic/gin
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/search/routes.go
+package search
+
+import "github.com/gin-gonic/gin"
+
+// RegisterRoutes wires the search handler to the Gin engine.
+func RegisterRoutes(r *gin.Engine, h *Handler, authMiddleware gin.HandlerFunc) {
+	r.GET("/api/v1/search", authMiddleware, h.Search)
+}
+END_FILE:internal/adapters/http/search/routes.go
 # path: internal/adapters/http/calendar/routes.go | lang: go | tokens: 61 | size: 246
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/calendar/routes.go
@@ -19225,19 +19770,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/calendar/routes.go
-# path: internal/adapters/http/search/routes.go | lang: go | tokens: 61 | size: 247
-# imports: github.com/gin-gonic/gin
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/search/routes.go
-package search
-
-import "github.com/gin-gonic/gin"
-
-// RegisterRoutes wires the search handler to the Gin engine.
-func RegisterRoutes(r *gin.Engine, h *Handler, authMiddleware gin.HandlerFunc) {
-	r.GET("/api/v1/search", authMiddleware, h.Search)
-}
-END_FILE:internal/adapters/http/search/routes.go
 # path: internal/domain/onboarding/usecase.go | lang: go | tokens: 59 | size: 239
 BEGIN_FILE:internal/domain/onboarding/usecase.go
 package onboarding
@@ -19345,18 +19877,6 @@ type Repository interface {
 	GetCalendarEvents(ctx context.Context, orgID uint, userID *uint, startDate time.Time, endDate time.Time) ([]CalendarEvent, error)
 }
 END_FILE:internal/domain/calendar/repository.go
-# path: internal/domain/search/repository.go | lang: go | tokens: 49 | size: 199
-# imports: context
-BEGIN_FILE:internal/domain/search/repository.go
-package search
-
-import "context"
-
-// Repository defines the data access contract for search.
-type Repository interface {
-	Search(ctx context.Context, filters *SearchFilters) (*SearchResults, error)
-}
-END_FILE:internal/domain/search/repository.go
 # path: internal/domain/search/usecase.go | lang: go | tokens: 49 | size: 197
 # imports: context
 BEGIN_FILE:internal/domain/search/usecase.go
@@ -19369,6 +19889,18 @@ type UseCase interface {
 	Search(ctx context.Context, filters *SearchFilters) (*SearchResults, error)
 }
 END_FILE:internal/domain/search/usecase.go
+# path: internal/domain/search/repository.go | lang: go | tokens: 49 | size: 199
+# imports: context
+BEGIN_FILE:internal/domain/search/repository.go
+package search
+
+import "context"
+
+// Repository defines the data access contract for search.
+type Repository interface {
+	Search(ctx context.Context, filters *SearchFilters) (*SearchResults, error)
+}
+END_FILE:internal/domain/search/repository.go
 # path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
 # imports: context
 BEGIN_FILE:internal/domain/files/usecase.go
@@ -19425,22 +19957,6 @@ package websocket
 // PresenceTracker can be used for future extension of presence logic
 type PresenceTracker struct{}
 END_FILE:internal/platform/websocket/presence_tracker.go
-# path: internal/usecase/milestones/usecase.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/usecase/milestones/usecase.go
-package milestones
-END_FILE:internal/usecase/milestones/usecase.go
-# path: internal/domain/analytics/usecase.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/domain/analytics/usecase.go
-package analytics
-END_FILE:internal/domain/analytics/usecase.go
-# path: internal/adapters/repository/milestones/gorm_repository.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
-package milestones
-END_FILE:internal/adapters/repository/milestones/gorm_repository.go
-# path: internal/adapters/http/milestones/routes.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/http/milestones/routes.go
-package milestone
-END_FILE:internal/adapters/http/milestones/routes.go
 # path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
 BEGIN_FILE:internal/adapters/http/milestones/handler.go
 package milestone
@@ -19449,10 +19965,38 @@ END_FILE:internal/adapters/http/milestones/handler.go
 BEGIN_FILE:internal/domain/analytics/repository.go
 package analytics
 END_FILE:internal/domain/analytics/repository.go
-# path: internal/adapters/http/audit/routes.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/adapters/http/audit/routes.go
+# path: internal/usecase/milestones/usecase.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/usecase/milestones/usecase.go
+package milestones
+END_FILE:internal/usecase/milestones/usecase.go
+# path: internal/adapters/http/milestones/routes.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/milestones/routes.go
+package milestone
+END_FILE:internal/adapters/http/milestones/routes.go
+# path: internal/adapters/repository/milestones/gorm_repository.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
+package milestones
+END_FILE:internal/adapters/repository/milestones/gorm_repository.go
+# path: internal/domain/analytics/usecase.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/domain/analytics/usecase.go
+package analytics
+END_FILE:internal/domain/analytics/usecase.go
+# path: internal/domain/milestones/entity.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/entity.go
+package entity
+END_FILE:internal/domain/milestones/entity.go
+# path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/repository.go
 package audit
-END_FILE:internal/adapters/http/audit/routes.go
+END_FILE:internal/domain/audit/repository.go
+# path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/entity.go
+package audit
+END_FILE:internal/domain/audit/entity.go
+# path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/audit/usecase.go
+package audit
+END_FILE:internal/domain/audit/usecase.go
 # path: internal/domain/milestones/repository.go | lang: go | tokens: 3 | size: 14
 BEGIN_FILE:internal/domain/milestones/repository.go
 package entity
@@ -19461,32 +20005,20 @@ END_FILE:internal/domain/milestones/repository.go
 BEGIN_FILE:internal/domain/milestones/usecase.go
 package entity
 END_FILE:internal/domain/milestones/usecase.go
-# path: internal/domain/milestones/entity.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/entity.go
-package entity
-END_FILE:internal/domain/milestones/entity.go
+# path: internal/adapters/http/audit/routes.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/adapters/http/audit/routes.go
+package audit
+END_FILE:internal/adapters/http/audit/routes.go
 # path: internal/adapters/http/audit/handler.go | lang: go | tokens: 3 | size: 14
 BEGIN_FILE:internal/adapters/http/audit/handler.go
 package audit
 END_FILE:internal/adapters/http/audit/handler.go
-# path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/audit/usecase.go
-package audit
-END_FILE:internal/domain/audit/usecase.go
-# path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/domain/audit/entity.go
-package audit
-END_FILE:internal/domain/audit/entity.go
 # path: internal/usecase/audit/usecase.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/usecase/audit/usecase.go
 package audit
 END_FILE:internal/usecase/audit/usecase.go
-# path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/domain/audit/repository.go
-package audit
-END_FILE:internal/domain/audit/repository.go
 # path: internal/adapters/repository/audit/gorm_repository.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/adapters/repository/audit/gorm_repository.go
 package audit
 END_FILE:internal/adapters/repository/audit/gorm_repository.go
-# included: 240 / 240 | total tokens: 139059
+# included: 244 / 244 | total tokens: 143162

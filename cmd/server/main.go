@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+
 	"server/internal/app/routes"
 	"server/internal/platform/cloudinary"
 	"server/internal/platform/database"
+	"server/internal/platform/redis"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -13,10 +19,15 @@ import (
 func init() {
 	godotenv.Load(".env")
 	database.Init()
+	redis.Init()
 	cloudinary.Init()
 }
 
 func main() {
+	// Listen for OS signals for graceful context cancellation
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Perform database migrations
 	if err := database.PerformMigrations(); err != nil {
 		panic("Failed to perform database migrations: " + err.Error())
@@ -31,7 +42,7 @@ func main() {
 		ExposeHeaders:    []string{"Content-Length", "Authorization"},
 		AllowCredentials: true,
 	}))
-	routes.SetupRoutes(r)
+	routes.SetupRoutes(ctx, r)
 
 	r.Run(":8000")
 }
