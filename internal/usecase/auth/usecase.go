@@ -240,7 +240,7 @@ func (s *service) SendVerificationEmail(ctx context.Context, userID uint) error 
 	if frontendURL == "" {
 		frontendURL = "https://sampnet.achiket.site"
 	}
-	verificationURL := fmt.Sprintf("%s/verify-email-landing?token=%s", frontendURL, token)
+	verificationURL := fmt.Sprintf("%s/#/verify-email-landing?token=%s", frontendURL, token)
 
 	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -299,4 +299,3 @@ func (s *service) GetMe(ctx context.Context, userID uint) (domain.TokenPair, err
 	}
 	return s.issueTokenPair(ctx, user)
 }
-

@@ -35,7 +35,6 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		FileName: c.PostForm("file_name"),
 		FileType: c.PostForm("file_type"),
 		FileSize: int64(len(imageData)),
-		Data:     imageData,
 	}
 
 	if err := h.uc.UploadFile(c.Request.Context(), fileDomain); err != nil {
