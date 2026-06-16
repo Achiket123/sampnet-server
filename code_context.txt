@@ -1,5 +1,5 @@
 # Code Context
-# Generated: 2026-06-15T23:48:46+05:30
+# Generated: 2026-06-16T23:44:10+05:30
 # Files: 244
 #
 # To extract all files back to disk, run:
@@ -4782,7 +4782,7 @@ func (r *gormRepository) ExportOrgData(orgID uint) (string, error) {
 	return string(data), nil
 }
 END_FILE:internal/adapters/repository/settings/gorm_repository.go
-# path: internal/app/routes/routes.go | lang: go | tokens: 2956 | size: 11824
+# path: internal/app/routes/routes.go | lang: go | tokens: 2957 | size: 11828
 # functions: SetupRoutes
 BEGIN_FILE:internal/app/routes/routes.go
 package routes
@@ -4874,14 +4874,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func SetupRoutes(r *gin.Engine) {
+func SetupRoutes(ctx context.Context, r *gin.Engine) {
 	validateToken := middlewares.ValidateToken()
 
 	// Initialize WebSocket hub and broadcaster
 	hub := websocket.NewHub()
 	go hub.Run()
 	broadcaster := websocket.NewRedisBroadcaster(hub, redis.Client, "notifications")
-	go websocket.StartSubscriber(context.Background(), redis.Client, "notifications", hub)
+	go websocket.StartSubscriber(ctx, redis.Client, "notifications", hub)
 	wsManager := websocket.NewManager(hub)
 
 	notificationRepository := notificationsRepo.NewGormRepository(database.DB)
@@ -17320,6 +17320,58 @@ type LeaveHistory struct {
 	Summary LeaveSummary `json:"summary"`
 }
 END_FILE:internal/domain/leave/entity.go
+# path: cmd/server/main.go | lang: go | tokens: 294 | size: 1178
+# functions: init, main
+BEGIN_FILE:cmd/server/main.go
+package main
+
+import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"server/internal/app/routes"
+	"server/internal/platform/cloudinary"
+	"server/internal/platform/database"
+	"server/internal/platform/redis"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+)
+
+func init() {
+	godotenv.Load(".env")
+	database.Init()
+	redis.Init()
+	cloudinary.Init()
+}
+
+func main() {
+	// Listen for OS signals for graceful context cancellation
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Perform database migrations
+	if err := database.PerformMigrations(); err != nil {
+		panic("Failed to perform database migrations: " + err.Error())
+	}
+	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowOriginFunc: func(origin string) bool {
+			return true
+		},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length", "Authorization"},
+		AllowCredentials: true,
+	}))
+	routes.SetupRoutes(ctx, r)
+
+	r.Run(":8000")
+}
+END_FILE:cmd/server/main.go
 # path: internal/platform/database/models/research_document_model.go | lang: go | tokens: 291 | size: 1167
 # imports: gorm.io/gorm
 BEGIN_FILE:internal/platform/database/models/research_document_model.go
@@ -17850,49 +17902,6 @@ type AttendanceHistory struct {
 	Summary AttendanceSummary `json:"summary"`
 }
 END_FILE:internal/domain/attendance/entity.go
-# path: cmd/server/main.go | lang: go | tokens: 239 | size: 959
-# functions: init, main
-BEGIN_FILE:cmd/server/main.go
-package main
-
-import (
-	"server/internal/app/routes"
-	"server/internal/platform/cloudinary"
-	"server/internal/platform/database"
-	"server/internal/platform/redis"
-
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
-)
-
-func init() {
-	godotenv.Load(".env")
-	database.Init()
-	redis.Init()
-	cloudinary.Init()
-}
-
-func main() {
-	// Perform database migrations
-	if err := database.PerformMigrations(); err != nil {
-		panic("Failed to perform database migrations: " + err.Error())
-	}
-	r := gin.Default()
-	r.Use(cors.New(cors.Config{
-		AllowOriginFunc: func(origin string) bool {
-			return true
-		},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length", "Authorization"},
-		AllowCredentials: true,
-	}))
-	routes.SetupRoutes(r)
-
-	r.Run(":8000")
-}
-END_FILE:cmd/server/main.go
 # path: internal/usecase/organisation/usecase.go | lang: go | tokens: 234 | size: 936
 # functions: NewService
 BEGIN_FILE:internal/usecase/organisation/usecase.go
@@ -20021,4 +20030,4 @@ END_FILE:internal/usecase/audit/usecase.go
 BEGIN_FILE:internal/adapters/repository/audit/gorm_repository.go
 package audit
 END_FILE:internal/adapters/repository/audit/gorm_repository.go
-# included: 244 / 244 | total tokens: 143162
+# included: 244 / 244 | total tokens: 143218
