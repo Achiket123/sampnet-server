@@ -1,8 +1,12 @@
 package websocket
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // Envelope is the standard JSON structure for all WebSocket messages
@@ -13,12 +17,24 @@ type Envelope struct {
 
 // Manager handles application-level WebSocket operations using the Hub
 type Manager struct {
-	Hub *Hub
+	Hub         *Hub
+	RedisClient *redis.Client
+	Channel     string
 }
 
 // NewManager creates a new WebSocketManager
-func NewManager(hub *Hub) *Manager {
-	return &Manager{Hub: hub}
+func NewManager(hub *Hub, redisClient *redis.Client, channel string) *Manager {
+	return &Manager{
+		Hub:         hub,
+		RedisClient: redisClient,
+		Channel:     channel,
+	}
+}
+
+type managerPubSubMessage struct {
+	TargetUserID string `json:"target_user_id"`
+	TargetRoomID string `json:"target_room_id"`
+	Payload      []byte `json:"payload"`
 }
 
 // SendToUser marshals the payload into an envelope and sends it to the specific user via the Hub
@@ -33,13 +49,29 @@ func (m *Manager) SendToUser(userID string, eventType string, payload interface{
 		return fmt.Errorf("failed to marshal websocket envelope: %w", err)
 	}
 
-	m.Hub.Broadcast <- &HubMessage{
+	pubMsg := managerPubSubMessage{
 		TargetUserID: userID,
 		Payload:      data,
 	}
 
+	msgData, err := json.Marshal(pubMsg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pubsub message: %w", err)
+	}
+
+	// Publish to Redis channel with background context
+	err = m.RedisClient.Publish(context.Background(), m.Channel, msgData).Err()
+	if err != nil {
+		log.Printf("Error publishing websocket message to Redis: %v", err)
+		m.Hub.Broadcast <- &HubMessage{
+			TargetUserID: userID,
+			Payload:      data,
+		}
+	}
+
 	return nil
 }
+
 // SendToRoom marshals the payload into an envelope and sends it to all clients in the room via the Hub
 func (m *Manager) SendToRoom(roomID string, eventType string, payload interface{}) error {
 	envelope := Envelope{
@@ -52,13 +84,29 @@ func (m *Manager) SendToRoom(roomID string, eventType string, payload interface{
 		return fmt.Errorf("failed to marshal websocket envelope: %w", err)
 	}
 
-	m.Hub.Broadcast <- &HubMessage{
+	pubMsg := managerPubSubMessage{
 		TargetRoomID: roomID,
 		Payload:      data,
 	}
 
+	msgData, err := json.Marshal(pubMsg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pubsub message: %w", err)
+	}
+
+	// Publish to Redis channel with background context
+	err = m.RedisClient.Publish(context.Background(), m.Channel, msgData).Err()
+	if err != nil {
+		log.Printf("Error publishing room message to Redis: %v", err)
+		m.Hub.Broadcast <- &HubMessage{
+			TargetRoomID: roomID,
+			Payload:      data,
+		}
+	}
+
 	return nil
 }
+
 // IsOnline checks if a specific user is currently connected to the WebSocket
 func (m *Manager) IsOnline(userID string) bool {
 	return m.Hub.IsOnline(userID)
@@ -74,3 +122,4 @@ func (m *Manager) GetOnlineUsers(userIDs []string) []string {
 	}
 	return online
 }
+

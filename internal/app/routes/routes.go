@@ -95,7 +95,8 @@ func SetupRoutes(ctx context.Context, r *gin.Engine) {
 	go hub.Run()
 	broadcaster := websocket.NewRedisBroadcaster(hub, redis.Client, "notifications")
 	go websocket.StartSubscriber(ctx, redis.Client, "notifications", hub)
-	wsManager := websocket.NewManager(hub)
+	wsManager := websocket.NewManager(hub, redis.Client, "ws_manager_broadcast")
+	go websocket.StartManagerSubscriber(ctx, redis.Client, "ws_manager_broadcast", hub)
 
 	notificationRepository := notificationsRepo.NewGormRepository(database.DB)
 	notificationUseCase := notificationsService.NewService(notificationRepository, broadcaster)
@@ -185,11 +186,12 @@ func SetupRoutes(ctx context.Context, r *gin.Engine) {
 	callStateHandler := callStateHTTP.NewHandler(callStateUseCase, wsManager, chatRepository)
 	callStateHTTP.RegisterRoutes(r, callStateHandler, validateToken)
 
-	callUseCase := callService.NewService()
+	callUseCase := callService.NewService(redis.Client)
 	callHandler := callHTTP.NewHandler(callUseCase)
 	callHTTP.RegisterRoutes(r, callHandler)
 
 	searchRepository := searchRepo.NewGormRepository(database.DB)
+	searchRepository = searchRepo.NewCachedRepository(redis.Client, searchRepository, 30*time.Second)
 	searchUseCase := searchService.NewService(searchRepository)
 	searchHandler := searchHTTP.NewHandler(searchUseCase)
 	searchHTTP.RegisterRoutes(r, searchHandler, validateToken)
@@ -210,11 +212,13 @@ func SetupRoutes(ctx context.Context, r *gin.Engine) {
 	researchHTTP.RegisterRoutes(r, researchHandler, validateToken)
 
 	peopleRepository := peopleRepo.NewRepository(database.DB)
+	peopleRepository = peopleRepo.NewCachedRepository(redis.Client, peopleRepository)
 	peopleUseCase := peopleService.NewUseCase(peopleRepository)
 	peopleHandler := peopleHTTP.NewHandler(peopleUseCase)
 	peopleHTTP.RegisterRoutes(r, peopleHandler, validateToken)
 
 	analyticsRepository := analyticsRepo.NewGormRepository(database.DB)
+	analyticsRepository = analyticsRepo.NewCachedRepository(redis.Client, analyticsRepository, 120*time.Second)
 	analyticsUseCase := analyticsService.NewService(analyticsRepository)
 	analyticsHandler := analyticsHTTP.NewHandler(analyticsUseCase)
 	
