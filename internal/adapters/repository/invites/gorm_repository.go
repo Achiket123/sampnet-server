@@ -74,6 +74,23 @@ func (r *gormRepository) GetByOrg(ctx context.Context, orgID uint) ([]domain.Emp
 	return res, nil
 }
 
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.EmployeeInvite, error) {
+	var m models.EmployeeInvite
+	if err := r.db.WithContext(ctx).First(&m, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("invite not found")
+		}
+		return nil, err
+	}
+	return toDomain(&m), nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, invite *domain.EmployeeInvite) error {
+	m := toModel(invite)
+	return r.db.WithContext(ctx).Save(m).Error
+}
+
+
 func (r *gormRepository) AcceptInvite(ctx context.Context, inviteID uint, u *authDomain.User, emp *employeesDomain.Employee) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		userModel := &models.UserModel{

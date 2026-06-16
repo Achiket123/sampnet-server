@@ -69,7 +69,6 @@ func PerformMigrations() error {
 		&models.TaskActivity{},
 		&models.WorkSchedule{},
 		&models.AuditLog{},
-		&models.Invite{},
 		&models.EmployeeInvite{},
 		&models.EmailVerification{},
 		&models.ResourceCollection{},

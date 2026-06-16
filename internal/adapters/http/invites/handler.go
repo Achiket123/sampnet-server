@@ -125,3 +125,45 @@ func (h *Handler) GetInvites(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"invites": invites})
 }
+
+func (h *Handler) ResendInvite(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	if role != "boss" && role != "manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
+		return
+	}
+
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.uc.ResendInvite(c.Request.Context(), req.Email, orgID); err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "unauthorized") {
+			c.JSON(http.StatusForbidden, gin.H{"error": errMsg})
+			return
+		}
+		if strings.Contains(errMsg, "cannot resend") {
+			c.JSON(http.StatusConflict, gin.H{"error": errMsg})
+			return
+		}
+		if strings.Contains(errMsg, "not found") {
+			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Invitation email resent successfully"})
+}
