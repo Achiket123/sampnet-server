@@ -3,6 +3,7 @@ package chats
 import (
 	"context"
 	"fmt"
+	"strings"
 	domain "server/internal/domain/chats"
 	"server/internal/platform/database/models"
 	"time"
@@ -195,7 +196,17 @@ func (r *GormRepository) ListByUser(ctx context.Context, userID uint, orgID uint
 			if !chat.IsGroup && len(chat.Participants) == 2 {
 				for _, p := range chat.Participants {
 					if p.UserID != userID {
-						chat.Name = fmt.Sprintf("%s %s", p.FirstName, p.LastName)
+						firstName := strings.TrimSpace(p.FirstName)
+						lastName := strings.TrimSpace(p.LastName)
+						if firstName == "" && lastName == "" {
+							chat.Name = fmt.Sprintf("User %d", p.UserID)
+						} else if firstName == "" {
+							chat.Name = lastName
+						} else if lastName == "" {
+							chat.Name = firstName
+						} else {
+							chat.Name = fmt.Sprintf("%s %s", firstName, lastName)
+						}
 						break
 					}
 				}

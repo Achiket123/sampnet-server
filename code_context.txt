@@ -1,6 +1,6 @@
 # Code Context
-# Generated: 2026-06-16T23:44:10+05:30
-# Files: 244
+# Generated: 2026-06-19T23:10:37+05:30
+# Files: 247
 #
 # To extract all files back to disk, run:
 #   awk '/^BEGIN_FILE:/{f=substr($0,11); sub(/^:/, "", f); next} /^END_FILE:/{f=""; next} f{print > f}' code_context.txt
@@ -4782,7 +4782,7 @@ func (r *gormRepository) ExportOrgData(orgID uint) (string, error) {
 	return string(data), nil
 }
 END_FILE:internal/adapters/repository/settings/gorm_repository.go
-# path: internal/app/routes/routes.go | lang: go | tokens: 2957 | size: 11828
+# path: internal/app/routes/routes.go | lang: go | tokens: 3063 | size: 12254
 # functions: SetupRoutes
 BEGIN_FILE:internal/app/routes/routes.go
 package routes
@@ -4882,7 +4882,8 @@ func SetupRoutes(ctx context.Context, r *gin.Engine) {
 	go hub.Run()
 	broadcaster := websocket.NewRedisBroadcaster(hub, redis.Client, "notifications")
 	go websocket.StartSubscriber(ctx, redis.Client, "notifications", hub)
-	wsManager := websocket.NewManager(hub)
+	wsManager := websocket.NewManager(hub, redis.Client, "ws_manager_broadcast")
+	go websocket.StartManagerSubscriber(ctx, redis.Client, "ws_manager_broadcast", hub)
 
 	notificationRepository := notificationsRepo.NewGormRepository(database.DB)
 	notificationUseCase := notificationsService.NewService(notificationRepository, broadcaster)
@@ -4972,11 +4973,12 @@ func SetupRoutes(ctx context.Context, r *gin.Engine) {
 	callStateHandler := callStateHTTP.NewHandler(callStateUseCase, wsManager, chatRepository)
 	callStateHTTP.RegisterRoutes(r, callStateHandler, validateToken)
 
-	callUseCase := callService.NewService()
+	callUseCase := callService.NewService(redis.Client)
 	callHandler := callHTTP.NewHandler(callUseCase)
 	callHTTP.RegisterRoutes(r, callHandler)
 
 	searchRepository := searchRepo.NewGormRepository(database.DB)
+	searchRepository = searchRepo.NewCachedRepository(redis.Client, searchRepository, 30*time.Second)
 	searchUseCase := searchService.NewService(searchRepository)
 	searchHandler := searchHTTP.NewHandler(searchUseCase)
 	searchHTTP.RegisterRoutes(r, searchHandler, validateToken)
@@ -4997,11 +4999,13 @@ func SetupRoutes(ctx context.Context, r *gin.Engine) {
 	researchHTTP.RegisterRoutes(r, researchHandler, validateToken)
 
 	peopleRepository := peopleRepo.NewRepository(database.DB)
+	peopleRepository = peopleRepo.NewCachedRepository(redis.Client, peopleRepository)
 	peopleUseCase := peopleService.NewUseCase(peopleRepository)
 	peopleHandler := peopleHTTP.NewHandler(peopleUseCase)
 	peopleHTTP.RegisterRoutes(r, peopleHandler, validateToken)
 
 	analyticsRepository := analyticsRepo.NewGormRepository(database.DB)
+	analyticsRepository = analyticsRepo.NewCachedRepository(redis.Client, analyticsRepository, 120*time.Second)
 	analyticsUseCase := analyticsService.NewService(analyticsRepository)
 	analyticsHandler := analyticsHTTP.NewHandler(analyticsUseCase)
 	
@@ -5015,6 +5019,397 @@ func SetupRoutes(ctx context.Context, r *gin.Engine) {
 	settingsHTTP.RegisterRoutes(r, settingsHandler, validateToken)
 }
 END_FILE:internal/app/routes/routes.go
+# path: internal/adapters/repository/people/redis_cache_repository.go | lang: go | tokens: 3010 | size: 12040
+# functions: NewCachedRepository
+BEGIN_FILE:internal/adapters/repository/people/redis_cache_repository.go
+package people
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"strconv"
+	"strings"
+	"time"
+
+	domain "server/internal/domain/people"
+
+	"github.com/redis/go-redis/v9"
+)
+
+type cachedRepository struct {
+	client *redis.Client
+	inner  domain.Repository
+}
+
+// NewCachedRepository wraps a people Repository with a Redis caching layer.
+func NewCachedRepository(client *redis.Client, inner domain.Repository) domain.Repository {
+	return &cachedRepository{
+		client: client,
+		inner:  inner,
+	}
+}
+
+// Contacts
+
+func (r *cachedRepository) GetContacts(ctx context.Context, filter domain.ContactsFilter, orgID uint) (*domain.ContactsResponse, error) {
+	version := "0"
+	vKey := "people:contacts_version:" + strconv.FormatUint(uint64(orgID), 10)
+	vVal, err := r.client.Get(ctx, vKey).Result()
+	if err == nil {
+		version = vVal
+	} else if err != redis.Nil {
+		log.Printf("Redis error getting contacts version: %v", err)
+	}
+
+	stageStr := "none"
+	if filter.Stage != nil {
+		stageStr = *filter.Stage
+	}
+
+	typeStr := "none"
+	if filter.Type != nil {
+		typeStr = *filter.Type
+	}
+
+	statusStr := "none"
+	if filter.Status != nil {
+		statusStr = *filter.Status
+	}
+
+	listStr := "none"
+	if filter.ListID != nil {
+		listStr = strconv.Itoa(*filter.ListID)
+	}
+
+	searchStr := "none"
+	trimmedSearch := strings.TrimSpace(strings.ToLower(filter.Search))
+	if trimmedSearch != "" {
+		searchStr = trimmedSearch
+	}
+
+	sortByStr := "none"
+	if filter.SortBy != "" {
+		sortByStr = filter.SortBy
+	}
+
+	sortOrderStr := "none"
+	if filter.SortOrder != "" {
+		sortOrderStr = filter.SortOrder
+	}
+
+	pageStr := strconv.Itoa(filter.Page)
+	limitStr := strconv.Itoa(filter.Limit)
+
+	sig := strings.Join([]string{
+		stageStr,
+		typeStr,
+		statusStr,
+		listStr,
+		searchStr,
+		sortByStr,
+		sortOrderStr,
+		pageStr,
+		limitStr,
+	}, ":")
+
+	cacheKey := fmt.Sprintf("people:contacts:%d:v%s:%s", orgID, version, sig)
+
+	cachedVal, err := r.client.Get(ctx, cacheKey).Result()
+	if err == nil {
+		var resp domain.ContactsResponse
+		if err := json.Unmarshal([]byte(cachedVal), &resp); err == nil {
+			return &resp, nil
+		}
+		log.Printf("Error unmarshaling cached contacts: %v", err)
+	} else if err != redis.Nil {
+		log.Printf("Redis error getting cached contacts: %v", err)
+	}
+
+	resp, err := r.inner.GetContacts(ctx, filter, orgID)
+	if err != nil {
+		return nil, err
+	}
+
+	respBytes, err := json.Marshal(resp)
+	if err == nil {
+		if err := r.client.Set(ctx, cacheKey, respBytes, 30*time.Second).Err(); err != nil {
+			log.Printf("Redis error setting cached contacts: %v", err)
+		}
+	} else {
+		log.Printf("Error marshaling contacts response for cache: %v", err)
+	}
+
+	return resp, nil
+}
+
+func (r *cachedRepository) GetContactByID(ctx context.Context, id uint, orgID uint) (*domain.PeopleContact, error) {
+	key := "people:contact:" + strconv.FormatUint(uint64(id), 10)
+	cachedVal, err := r.client.Get(ctx, key).Result()
+	if err == nil {
+		var contact domain.PeopleContact
+		if err := json.Unmarshal([]byte(cachedVal), &contact); err == nil {
+			if contact.OrganisationID == orgID {
+				return &contact, nil
+			}
+		} else {
+			log.Printf("Error unmarshaling cached contact: %v", err)
+		}
+	} else if err != redis.Nil {
+		log.Printf("Redis error getting cached contact: %v", err)
+	}
+
+	contact, err := r.inner.GetContactByID(ctx, id, orgID)
+	if err != nil {
+		return nil, err
+	}
+
+	contactBytes, err := json.Marshal(contact)
+	if err == nil {
+		if err := r.client.Set(ctx, key, contactBytes, 60*time.Second).Err(); err != nil {
+			log.Printf("Redis error setting cached contact: %v", err)
+		}
+	} else {
+		log.Printf("Error marshaling contact for cache: %v", err)
+	}
+
+	return contact, nil
+}
+
+func (r *cachedRepository) CreateContact(ctx context.Context, contact *domain.PeopleContact) error {
+	err := r.inner.CreateContact(ctx, contact)
+	if err != nil {
+		return err
+	}
+	vKey := "people:contacts_version:" + strconv.FormatUint(uint64(contact.OrganisationID), 10)
+	if err := r.client.Incr(ctx, vKey).Err(); err != nil {
+		log.Printf("Redis error incrementing contacts version: %v", err)
+	}
+	return nil
+}
+
+func (r *cachedRepository) UpdateContact(ctx context.Context, contact *domain.PeopleContact) error {
+	err := r.inner.UpdateContact(ctx, contact)
+	if err != nil {
+		return err
+	}
+	key := "people:contact:" + strconv.FormatUint(uint64(contact.ID), 10)
+	if err := r.client.Del(ctx, key).Err(); err != nil {
+		log.Printf("Redis error deleting contact key: %v", err)
+	}
+	vKey := "people:contacts_version:" + strconv.FormatUint(uint64(contact.OrganisationID), 10)
+	if err := r.client.Incr(ctx, vKey).Err(); err != nil {
+		log.Printf("Redis error incrementing contacts version: %v", err)
+	}
+	return nil
+}
+
+func (r *cachedRepository) DeleteContact(ctx context.Context, id uint, orgID uint) error {
+	err := r.inner.DeleteContact(ctx, id, orgID)
+	if err != nil {
+		return err
+	}
+	key := "people:contact:" + strconv.FormatUint(uint64(id), 10)
+	if err := r.client.Del(ctx, key).Err(); err != nil {
+		log.Printf("Redis error deleting contact key: %v", err)
+	}
+	vKey := "people:contacts_version:" + strconv.FormatUint(uint64(orgID), 10)
+	if err := r.client.Incr(ctx, vKey).Err(); err != nil {
+		log.Printf("Redis error incrementing contacts version: %v", err)
+	}
+	return nil
+}
+
+func (r *cachedRepository) BulkUpdateStage(ctx context.Context, ids []uint, stage string, orgID uint, changedByID uint) error {
+	err := r.inner.BulkUpdateStage(ctx, ids, stage, orgID, changedByID)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		key := "people:contact:" + strconv.FormatUint(uint64(id), 10)
+		if err := r.client.Del(ctx, key).Err(); err != nil {
+			log.Printf("Redis error deleting contact key: %v", err)
+		}
+	}
+	vKey := "people:contacts_version:" + strconv.FormatUint(uint64(orgID), 10)
+	if err := r.client.Incr(ctx, vKey).Err(); err != nil {
+		log.Printf("Redis error incrementing contacts version: %v", err)
+	}
+	return nil
+}
+
+func (r *cachedRepository) BulkDelete(ctx context.Context, ids []uint, orgID uint) error {
+	err := r.inner.BulkDelete(ctx, ids, orgID)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		key := "people:contact:" + strconv.FormatUint(uint64(id), 10)
+		if err := r.client.Del(ctx, key).Err(); err != nil {
+			log.Printf("Redis error deleting contact key: %v", err)
+		}
+	}
+	vKey := "people:contacts_version:" + strconv.FormatUint(uint64(orgID), 10)
+	if err := r.client.Incr(ctx, vKey).Err(); err != nil {
+		log.Printf("Redis error incrementing contacts version: %v", err)
+	}
+	return nil
+}
+
+func (r *cachedRepository) AssignContact(ctx context.Context, contactID uint, employeeID uint, orgID uint) error {
+	err := r.inner.AssignContact(ctx, contactID, employeeID, orgID)
+	if err != nil {
+		return err
+	}
+	key := "people:contact:" + strconv.FormatUint(uint64(contactID), 10)
+	if err := r.client.Del(ctx, key).Err(); err != nil {
+		log.Printf("Redis error deleting contact key: %v", err)
+	}
+	vKey := "people:contacts_version:" + strconv.FormatUint(uint64(orgID), 10)
+	if err := r.client.Incr(ctx, vKey).Err(); err != nil {
+		log.Printf("Redis error incrementing contacts version: %v", err)
+	}
+	return nil
+}
+
+// Interactions
+
+func (r *cachedRepository) GetInteractions(ctx context.Context, contactID uint, orgID uint) ([]domain.PeopleInteraction, error) {
+	return r.inner.GetInteractions(ctx, contactID, orgID)
+}
+
+func (r *cachedRepository) AddInteraction(ctx context.Context, interaction *domain.PeopleInteraction) error {
+	err := r.inner.AddInteraction(ctx, interaction)
+	if err != nil {
+		return err
+	}
+	// This method only receives a PeopleInteraction value which does not carry an OrganisationID field, so the version counter for the owning organisation cannot be located without an extra database lookup, and the contacts list view is allowed to show a slightly stale last contacted timestamp for up to the thirty second list cache ttl, which is an acceptable and deliberate tradeoff, not a bug.
+	key := "people:contact:" + strconv.FormatUint(uint64(interaction.ContactID), 10)
+	if err := r.client.Del(ctx, key).Err(); err != nil {
+		log.Printf("Redis error deleting contact key: %v", err)
+	}
+	return nil
+}
+
+func (r *cachedRepository) DeleteInteraction(ctx context.Context, interactionID uint, reqUserID uint, reqUserIsAdmin bool) error {
+	return r.inner.DeleteInteraction(ctx, interactionID, reqUserID, reqUserIsAdmin)
+}
+
+// Pipeline Stages
+
+func (r *cachedRepository) GetPipelineStages(ctx context.Context, orgID uint) ([]domain.PeoplePipelineStage, error) {
+	key := "people:pipeline_stages:" + strconv.FormatUint(uint64(orgID), 10)
+	cachedVal, err := r.client.Get(ctx, key).Result()
+	if err == nil {
+		var stages []domain.PeoplePipelineStage
+		if err := json.Unmarshal([]byte(cachedVal), &stages); err == nil {
+			return stages, nil
+		}
+		log.Printf("Error unmarshaling cached pipeline stages: %v", err)
+	} else if err != redis.Nil {
+		log.Printf("Redis error getting cached pipeline stages: %v", err)
+	}
+
+	stages, err := r.inner.GetPipelineStages(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+
+	stagesBytes, err := json.Marshal(stages)
+	if err == nil {
+		if err := r.client.Set(ctx, key, stagesBytes, 300*time.Second).Err(); err != nil {
+			log.Printf("Redis error setting cached pipeline stages: %v", err)
+		}
+	} else {
+		log.Printf("Error marshaling pipeline stages for cache: %v", err)
+	}
+
+	return stages, nil
+}
+
+func (r *cachedRepository) CreatePipelineStage(ctx context.Context, stage *domain.PeoplePipelineStage) error {
+	err := r.inner.CreatePipelineStage(ctx, stage)
+	if err != nil {
+		return err
+	}
+	key := "people:pipeline_stages:" + strconv.FormatUint(uint64(stage.OrganisationID), 10)
+	if err := r.client.Del(ctx, key).Err(); err != nil {
+		log.Printf("Redis error deleting pipeline stages: %v", err)
+	}
+	return nil
+}
+
+func (r *cachedRepository) UpdatePipelineStage(ctx context.Context, stage *domain.PeoplePipelineStage) error {
+	err := r.inner.UpdatePipelineStage(ctx, stage)
+	if err != nil {
+		return err
+	}
+	key := "people:pipeline_stages:" + strconv.FormatUint(uint64(stage.OrganisationID), 10)
+	if err := r.client.Del(ctx, key).Err(); err != nil {
+		log.Printf("Redis error deleting pipeline stages: %v", err)
+	}
+	return nil
+}
+
+func (r *cachedRepository) DeletePipelineStage(ctx context.Context, id uint, orgID uint, reassignToStage *string) error {
+	err := r.inner.DeletePipelineStage(ctx, id, orgID, reassignToStage)
+	if err != nil {
+		return err
+	}
+	key := "people:pipeline_stages:" + strconv.FormatUint(uint64(orgID), 10)
+	if err := r.client.Del(ctx, key).Err(); err != nil {
+		log.Printf("Redis error deleting pipeline stages: %v", err)
+	}
+	return nil
+}
+
+func (r *cachedRepository) ReorderPipelineStages(ctx context.Context, orderedIDs []uint, orgID uint) error {
+	err := r.inner.ReorderPipelineStages(ctx, orderedIDs, orgID)
+	if err != nil {
+		return err
+	}
+	key := "people:pipeline_stages:" + strconv.FormatUint(uint64(orgID), 10)
+	if err := r.client.Del(ctx, key).Err(); err != nil {
+		log.Printf("Redis error deleting pipeline stages: %v", err)
+	}
+	return nil
+}
+
+// Lists
+
+func (r *cachedRepository) GetLists(ctx context.Context, orgID uint) ([]domain.PeopleList, error) {
+	return r.inner.GetLists(ctx, orgID)
+}
+
+func (r *cachedRepository) CreateList(ctx context.Context, list *domain.PeopleList) error {
+	return r.inner.CreateList(ctx, list)
+}
+
+func (r *cachedRepository) UpdateList(ctx context.Context, list *domain.PeopleList) error {
+	return r.inner.UpdateList(ctx, list)
+}
+
+func (r *cachedRepository) DeleteList(ctx context.Context, id uint, orgID uint) error {
+	return r.inner.DeleteList(ctx, id, orgID)
+}
+
+func (r *cachedRepository) RemoveContactFromList(ctx context.Context, listID uint, contactID uint, orgID uint) error {
+	return r.inner.RemoveContactFromList(ctx, listID, contactID, orgID)
+}
+
+// Analytics
+
+func (r *cachedRepository) GetAnalytics(ctx context.Context, orgID uint) (*domain.PeopleAnalytics, error) {
+	return r.inner.GetAnalytics(ctx, orgID)
+}
+
+// Utils
+
+func (r *cachedRepository) HasContactsInStage(ctx context.Context, stageID uint, orgID uint) (bool, error) {
+	return r.inner.HasContactsInStage(ctx, stageID, orgID)
+}
+END_FILE:internal/adapters/repository/people/redis_cache_repository.go
 # path: internal/adapters/http/employees/handler.go | lang: go | tokens: 2612 | size: 10448
 # functions: NewHandler, getUserAuthInfo
 BEGIN_FILE:internal/adapters/http/employees/handler.go
@@ -6957,7 +7352,7 @@ func (u *usecase) GetAnalytics(ctx context.Context, orgID uint) (*people.PeopleA
 	return u.repo.GetAnalytics(ctx, orgID)
 }
 END_FILE:internal/usecase/people/usecase.go
-# path: internal/usecase/auth/usecase.go | lang: go | tokens: 2267 | size: 9070
+# path: internal/usecase/auth/usecase.go | lang: go | tokens: 2267 | size: 9071
 # functions: NewService
 BEGIN_FILE:internal/usecase/auth/usecase.go
 package auth
@@ -7202,7 +7597,7 @@ func (s *service) SendVerificationEmail(ctx context.Context, userID uint) error 
 	if frontendURL == "" {
 		frontendURL = "https://sampnet.achiket.site"
 	}
-	verificationURL := fmt.Sprintf("%s/verify-email-landing?token=%s", frontendURL, token)
+	verificationURL := fmt.Sprintf("%s/#/verify-email-landing?token=%s", frontendURL, token)
 
 	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -7261,8 +7656,276 @@ func (s *service) GetMe(ctx context.Context, userID uint) (domain.TokenPair, err
 	}
 	return s.issueTokenPair(ctx, user)
 }
-
 END_FILE:internal/usecase/auth/usecase.go
+# path: internal/usecase/invites/usecase.go | lang: go | tokens: 2238 | size: 8954
+# functions: NewService
+BEGIN_FILE:internal/usecase/invites/usecase.go
+package invites
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	authDomain "server/internal/domain/auth"
+	employeesDomain "server/internal/domain/employees"
+	domain "server/internal/domain/invites"
+	"server/internal/platform/database/models"
+	"server/internal/platform/mailer"
+	"server/internal/platform/miscallenous"
+)
+
+type service struct {
+	repo         domain.Repository
+	userRepo     authDomain.Repository
+	employeeRepo employeesDomain.Repository
+	mailer       mailer.Mailer
+}
+
+func NewService(repo domain.Repository, userRepo authDomain.Repository, employeeRepo employeesDomain.Repository, m mailer.Mailer) domain.UseCase {
+	return &service{
+		repo:         repo,
+		userRepo:     userRepo,
+		employeeRepo: employeeRepo,
+		mailer:       m,
+	}
+}
+
+func (s *service) InviteEmployee(ctx context.Context, invite *domain.EmployeeInvite) error {
+	// 1. Check duplicate
+	existing, err := s.repo.GetByEmail(ctx, invite.Email, invite.OrganisationID)
+	if err == nil && existing != nil {
+		return errors.New("an active invitation already exists for this email in the organisation")
+	}
+
+	// 2. Generate secure token
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return err
+	}
+	invite.Token = hex.EncodeToString(b)
+
+	// 3. Set properties
+	invite.Status = "pending"
+	invite.ExpiresAt = time.Now().Add(72 * time.Hour)
+
+	// 4. Persist to DB
+	if err := s.repo.Create(ctx, invite); err != nil {
+		return err
+	}
+
+	// 5. Build accept URL
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "https://sampnet.achiket.site" // fallback default
+	}
+	inviteURL := fmt.Sprintf("%s/accept-invite?token=%s", frontendURL, invite.Token)
+
+	// 6. Build HTML body
+	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; margin: 0; padding: 20px;">
+  <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+    <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-top: 0;">You're Invited!</h2>
+    <p>Hello %s,</p>
+    <p>You have been invited to join the organisation as an employee. Click the button below to set up your account and get started:</p>
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="%s" style="background-color: #3498db; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 4px; font-weight: bold; display: inline-block;">Accept Invitation</a>
+    </div>
+    <p style="font-size: 0.9em; color: #7f8c8d;">If the button doesn't work, copy and paste this link into your web browser:</p>
+    <p style="font-size: 0.9em; word-break: break-all; color: #3498db;"><a href="%s" style="color: #3498db;">%s</a></p>
+    <hr style="border: 0; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
+    <p style="font-size: 0.8em; color: #95a5a6; text-align: center;">This invitation expires in <strong>72 hours</strong>.</p>
+  </div>
+</body>
+</html>`, invite.FirstName, inviteURL, inviteURL, inviteURL)
+
+	// 7. Send the email
+	err = s.mailer.SendMail(invite.Email, "You're invited", htmlBody)
+	log.Default().Println(err)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *service) AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error) {
+	// 1. Look up invite
+	invite, err := s.repo.GetByToken(ctx, token)
+	if err != nil {
+		return authDomain.TokenPair{}, errors.New("invalid or expired invitation link")
+	}
+
+	// 2. Validate state
+	if invite.Status != "pending" {
+		return authDomain.TokenPair{}, errors.New("this invitation has already been used")
+	}
+	if time.Now().After(invite.ExpiresAt) {
+		return authDomain.TokenPair{}, errors.New("this invitation has expired")
+	}
+
+	// 3. Check if user already exists
+	var user *authDomain.User
+	hashed, errPassword := miscallenous.HashPassword(password)
+	if errPassword != nil {
+		return authDomain.TokenPair{}, errPassword
+	}
+
+	existingUser, err := s.userRepo.GetByEmail(ctx, invite.Email)
+	if err != nil {
+		// User does not exist — create them
+		user = &authDomain.User{
+			FirstName:      invite.FirstName,
+			LastName:       invite.LastName,
+			Email:          invite.Email,
+			PhoneNumber:    invite.PhoneNumber,
+			HashedPassword: hashed,
+			IsVerified:     true,
+		}
+	} else {
+		// User exists — update verification status and password
+		user = existingUser
+		user.HashedPassword = hashed
+		user.IsVerified = true
+	}
+
+	// 4. Build employee record
+	employee := &employeesDomain.Employee{
+		UserID:         user.ID,
+		OrganisationID: invite.OrganisationID,
+		EmploymentID:   invite.EmploymentID,
+		Email:          invite.Email,
+	}
+
+	// 5. Delegate atomically
+	if err := s.repo.AcceptInvite(ctx, invite.ID, user, employee); err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	// 6. Generate token pair
+	userModel := models.UserModel{
+		FirstName:   user.FirstName,
+		LastName:    user.LastName,
+		Email:       user.Email,
+		PhoneNumber: user.PhoneNumber,
+		IsVerified:  user.IsVerified,
+		ProfilePic:  user.ProfilePic,
+		City:        user.City,
+		Country:     user.Country,
+		DateOfBirth: user.DateOfBirth,
+		LastLoginAt: user.LastLoginAt,
+	}
+	userModel.ID = user.ID
+
+	accessToken, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
+	if err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	rawRefresh, err := miscallenous.GenerateRefreshToken()
+	if err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	refreshRecord := &authDomain.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: miscallenous.HashRefreshToken(rawRefresh),
+		ExpiresAt: miscallenous.RefreshTokenExpiresAt(),
+		Revoked:   false,
+	}
+
+	if err := s.userRepo.SaveRefreshToken(ctx, refreshRecord); err != nil {
+		return authDomain.TokenPair{}, err
+	}
+
+	return authDomain.TokenPair{
+		AccessToken:  accessToken,
+		RefreshToken: rawRefresh,
+	}, nil
+}
+
+func (s *service) GetInvitesByOrg(ctx context.Context, orgID uint) ([]domain.EmployeeInvite, error) {
+	return s.repo.GetByOrg(ctx, orgID)
+}
+
+func (s *service) ResendInvite(ctx context.Context, email string, orgID uint) error {
+	// 1. Fetch invite
+	invite, err := s.repo.GetByEmail(ctx, email, orgID)
+	if err != nil {
+		return err
+	}
+
+	// 2. Validate organisation match
+	if invite.OrganisationID != orgID {
+		return errors.New("unauthorized: invite belongs to a different organisation")
+	}
+
+	// 3. Check if invite is already accepted
+	if invite.Status == "accepted" {
+		return errors.New("cannot resend: invitation has already been accepted")
+	}
+
+	// 4. Check if the user is registered and verified
+	existingUser, err := s.userRepo.GetByEmail(ctx, invite.Email)
+	if err == nil && existingUser != nil && existingUser.IsVerified {
+		return errors.New("cannot resend: user is already registered and verified")
+	}
+
+	// 5. Generate secure token
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return err
+	}
+	invite.Token = hex.EncodeToString(b)
+
+	// 6. Reset properties
+	invite.Status = "pending"
+	invite.ExpiresAt = time.Now().Add(72 * time.Hour)
+
+	// 7. Update in DB
+	if err := s.repo.Update(ctx, invite); err != nil {
+		return err
+	}
+
+	// 8. Build accept URL
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "https://sampnet.achiket.site"
+	}
+	inviteURL := fmt.Sprintf("%s/#/accept-invite?token=%s", frontendURL, invite.Token)
+
+	// 9. Build HTML body
+	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; margin: 0; padding: 20px;">
+  <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+    <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-top: 0;">You're Invited!</h2>
+    <p>Hello %s,</p>
+    <p>You have been invited to join the organisation as an employee. Click the button below to set up your account and get started:</p>
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="%s" style="background-color: #3498db; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 4px; font-weight: bold; display: inline-block;">Accept Invitation</a>
+    </div>
+    <p style="font-size: 0.9em; color: #7f8c8d;">If the button doesn't work, copy and paste this link into your web browser:</p>
+    <p style="font-size: 0.9em; word-break: break-all; color: #3498db;"><a href="%s" style="color: #3498db;">%s</a></p>
+    <hr style="border: 0; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
+    <p style="font-size: 0.8em; color: #95a5a6; text-align: center;">This invitation expires in <strong>72 hours</strong>.</p>
+  </div>
+</body>
+</html>`, invite.FirstName, inviteURL, inviteURL, inviteURL)
+
+	// 10. Send the email
+	err = s.mailer.SendMail(invite.Email, "You're invited", htmlBody)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+END_FILE:internal/usecase/invites/usecase.go
 # path: internal/adapters/http/people/handler.go | lang: go | tokens: 2198 | size: 8795
 # functions: NewHandler, getOrgAndUser, parseFilter
 BEGIN_FILE:internal/adapters/http/people/handler.go
@@ -8837,202 +9500,275 @@ func toDomainList(modelsList []models.Task) []domain.Task {
 	return result
 }
 END_FILE:internal/adapters/repository/tasks/gorm_repository.go
-# path: internal/usecase/invites/usecase.go | lang: go | tokens: 1518 | size: 6075
+# path: internal/usecase/calls/usecase.go | lang: go | tokens: 1597 | size: 6389
 # functions: NewService
-BEGIN_FILE:internal/usecase/invites/usecase.go
-package invites
+BEGIN_FILE:internal/usecase/calls/usecase.go
+package calls
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
-	"fmt"
+	"encoding/json"
 	"log"
-	"os"
-	"time"
+	"sync"
 
-	authDomain "server/internal/domain/auth"
-	employeesDomain "server/internal/domain/employees"
-	domain "server/internal/domain/invites"
-	"server/internal/platform/database/models"
-	"server/internal/platform/mailer"
-	"server/internal/platform/miscallenous"
+	domain "server/internal/domain/calls"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 )
 
+type Room struct {
+	Offer      *Message
+	Clients    map[*websocket.Conn]bool
+	// Buffered ICE candidates are kept in memory on whichever instance first buffered them, and are only replayed to a client that later joins that same instance, cross instance replay of buffered candidates is out of scope for this change.
+	Candidates []Message
+	mu         sync.Mutex
+	PubSub     *redis.PubSub
+	CancelSub  context.CancelFunc
+}
+
+type Message struct {
+	Type      string      `json:"type"`
+	Offer     interface{} `json:"offer,omitempty"`
+	Answer    interface{} `json:"answer,omitempty"`
+	Candidate interface{} `json:"candidate,omitempty"`
+}
+
+type callSignalMessage struct {
+	OriginInstanceID string      `json:"origin_instance_id"`
+	Type             string      `json:"type"`
+	Offer            interface{} `json:"offer,omitempty"`
+	Answer           interface{} `json:"answer,omitempty"`
+	Candidate        interface{} `json:"candidate,omitempty"`
+}
+
+var rooms = make(map[string]*Room)
+var roomsMu sync.Mutex
+
 type service struct {
-	repo         domain.Repository
-	userRepo     authDomain.Repository
-	employeeRepo employeesDomain.Repository
-	mailer       mailer.Mailer
+	redisClient *redis.Client
+	instanceID  string
 }
 
-func NewService(repo domain.Repository, userRepo authDomain.Repository, employeeRepo employeesDomain.Repository, m mailer.Mailer) domain.UseCase {
+func NewService(redisClient *redis.Client) domain.UseCase {
 	return &service{
-		repo:         repo,
-		userRepo:     userRepo,
-		employeeRepo: employeeRepo,
-		mailer:       m,
+		redisClient: redisClient,
+		instanceID:  uuid.New().String(),
 	}
 }
 
-func (s *service) InviteEmployee(ctx context.Context, invite *domain.EmployeeInvite) error {
-	// 1. Check duplicate
-	existing, err := s.repo.GetByEmail(ctx, invite.Email, invite.OrganisationID)
-	if err == nil && existing != nil {
-		return errors.New("an active invitation already exists for this email in the organisation")
-	}
+func (s *service) HandleRoom(ctx context.Context, roomID string, ws *websocket.Conn) {
+	log.Printf("Client joined room: %s", roomID)
 
-	// 2. Generate secure token
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return err
-	}
-	invite.Token = hex.EncodeToString(b)
-
-	// 3. Set properties
-	invite.Status = "pending"
-	invite.ExpiresAt = time.Now().Add(72 * time.Hour)
-
-	// 4. Persist to DB
-	if err := s.repo.Create(ctx, invite); err != nil {
-		return err
-	}
-
-	// 5. Build accept URL
-	frontendURL := os.Getenv("FRONTEND_URL")
-	if frontendURL == "" {
-		frontendURL = "https://sampnet.achiket.site" // fallback default
-	}
-	inviteURL := fmt.Sprintf("%s/accept-invite?token=%s", frontendURL, invite.Token)
-
-	// 6. Build HTML body
-	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; margin: 0; padding: 20px;">
-  <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-    <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-top: 0;">You're Invited!</h2>
-    <p>Hello %s,</p>
-    <p>You have been invited to join the organisation as an employee. Click the button below to set up your account and get started:</p>
-    <div style="text-align: center; margin: 30px 0;">
-      <a href="%s" style="background-color: #3498db; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 4px; font-weight: bold; display: inline-block;">Accept Invitation</a>
-    </div>
-    <p style="font-size: 0.9em; color: #7f8c8d;">If the button doesn't work, copy and paste this link into your web browser:</p>
-    <p style="font-size: 0.9em; word-break: break-all; color: #3498db;"><a href="%s" style="color: #3498db;">%s</a></p>
-    <hr style="border: 0; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
-    <p style="font-size: 0.8em; color: #95a5a6; text-align: center;">This invitation expires in <strong>72 hours</strong>.</p>
-  </div>
-</body>
-</html>`, invite.FirstName, inviteURL, inviteURL, inviteURL)
-
-	// 7. Send the email
-	err = s.mailer.SendMail(invite.Email, "You're invited", htmlBody)
-	log.Default().Println(err)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *service) AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error) {
-	// 1. Look up invite
-	invite, err := s.repo.GetByToken(ctx, token)
-	if err != nil {
-		return authDomain.TokenPair{}, errors.New("invalid or expired invitation link")
-	}
-
-	// 2. Validate state
-	if invite.Status != "pending" {
-		return authDomain.TokenPair{}, errors.New("this invitation has already been used")
-	}
-	if time.Now().After(invite.ExpiresAt) {
-		return authDomain.TokenPair{}, errors.New("this invitation has expired")
-	}
-
-	// 3. Check if user already exists
-	var user *authDomain.User
-	hashed, errPassword := miscallenous.HashPassword(password)
-	if errPassword != nil {
-		return authDomain.TokenPair{}, errPassword
-	}
-
-	existingUser, err := s.userRepo.GetByEmail(ctx, invite.Email)
-	if err != nil {
-		// User does not exist — create them
-		user = &authDomain.User{
-			FirstName:      invite.FirstName,
-			LastName:       invite.LastName,
-			Email:          invite.Email,
-			PhoneNumber:    invite.PhoneNumber,
-			HashedPassword: hashed,
-			IsVerified:     true,
+	roomsMu.Lock()
+	room, ok := rooms[roomID]
+	var newlyCreated bool
+	if !ok {
+		room = &Room{
+			Clients:    make(map[*websocket.Conn]bool),
+			Candidates: []Message{},
 		}
-	} else {
-		// User exists — update verification status and password
-		user = existingUser
-		user.HashedPassword = hashed
-		user.IsVerified = true
+		rooms[roomID] = room
+		newlyCreated = true
+	}
+	roomsMu.Unlock()
+
+	if newlyCreated {
+		subCtx, cancelSub := context.WithCancel(context.Background())
+		room.CancelSub = cancelSub
+
+		channelName := "call_room:" + roomID
+		pubsub := s.redisClient.Subscribe(context.Background(), channelName)
+		room.PubSub = pubsub
+
+		go func() {
+			ch := pubsub.Channel()
+			for {
+				select {
+				case <-subCtx.Done():
+					pubsub.Close()
+					return
+				case msg, ok := <-ch:
+					if !ok {
+						return
+					}
+					var signal callSignalMessage
+					if err := json.Unmarshal([]byte(msg.Payload), &signal); err != nil {
+						log.Printf("Error unmarshaling call signal message: %v", err)
+						continue
+					}
+					if signal.OriginInstanceID == s.instanceID {
+						continue
+					}
+
+					room.mu.Lock()
+					localMsg := Message{
+						Type:      signal.Type,
+						Offer:     signal.Offer,
+						Answer:    signal.Answer,
+						Candidate: signal.Candidate,
+					}
+					for client := range room.Clients {
+						client.WriteJSON(localMsg)
+					}
+					room.mu.Unlock()
+				}
+			}
+		}()
 	}
 
-	// 4. Build employee record
-	employee := &employeesDomain.Employee{
-		UserID:         user.ID,
-		OrganisationID: invite.OrganisationID,
-		EmploymentID:   invite.EmploymentID,
-		Email:          invite.Email,
+	if room.Offer != nil {
+		log.Print("Sending offer to client")
+		ws.WriteJSON(*room.Offer)
 	}
 
-	// 5. Delegate atomically
-	if err := s.repo.AcceptInvite(ctx, invite.ID, user, employee); err != nil {
-		return authDomain.TokenPair{}, err
-	}
+	room.mu.Lock()
+	room.Clients[ws] = true
+	room.mu.Unlock()
 
-	// 6. Generate token pair
-	userModel := models.UserModel{
-		FirstName:   user.FirstName,
-		LastName:    user.LastName,
-		Email:       user.Email,
-		PhoneNumber: user.PhoneNumber,
-		IsVerified:  user.IsVerified,
-		ProfilePic:  user.ProfilePic,
-		City:        user.City,
-		Country:     user.Country,
-		DateOfBirth: user.DateOfBirth,
-		LastLoginAt: user.LastLoginAt,
-	}
-	userModel.ID = user.ID
+	defer func() {
+		room.mu.Lock()
+		delete(room.Clients, ws)
+		if len(room.Clients) == 0 {
+			roomsMu.Lock()
+			delete(rooms, roomID)
+			roomsMu.Unlock()
+			if room.CancelSub != nil {
+				room.CancelSub()
+			}
+		}
+		room.mu.Unlock()
+		ws.Close()
+	}()
 
-	accessToken, err := miscallenous.GenerateJWTToken(userModel, "user", user.ID)
-	if err != nil {
-		return authDomain.TokenPair{}, err
-	}
+	for {
+		var msg Message
+		err := ws.ReadJSON(&msg)
+		if err != nil {
+			log.Printf("Error reading message from room %s: %v", roomID, err)
+			break
+		}
 
-	rawRefresh, err := miscallenous.GenerateRefreshToken()
-	if err != nil {
-		return authDomain.TokenPair{}, err
+		switch msg.Type {
+		case "offer":
+			s.handleOffer(roomID, room, ws, msg)
+		case "answer":
+			s.handleAnswer(roomID, room, ws, msg)
+		case "candidate":
+			s.handleCandidate(roomID, room, msg)
+		case "endCall":
+			s.handleEndCall(roomID, room, ws)
+		}
 	}
-
-	refreshRecord := &authDomain.RefreshToken{
-		UserID:    user.ID,
-		TokenHash: miscallenous.HashRefreshToken(rawRefresh),
-		ExpiresAt: miscallenous.RefreshTokenExpiresAt(),
-		Revoked:   false,
-	}
-
-	if err := s.userRepo.SaveRefreshToken(ctx, refreshRecord); err != nil {
-		return authDomain.TokenPair{}, err
-	}
-
-	return authDomain.TokenPair{
-		AccessToken:  accessToken,
-		RefreshToken: rawRefresh,
-	}, nil
 }
 
-func (s *service) GetInvitesByOrg(ctx context.Context, orgID uint) ([]domain.EmployeeInvite, error) {
-	return s.repo.GetByOrg(ctx, orgID)
+func (s *service) handleOffer(roomID string, room *Room, ws *websocket.Conn, msg Message) {
+	room.mu.Lock()
+	room.Offer = &msg
+	for client := range room.Clients {
+		if client != ws {
+			client.WriteJSON(msg)
+		}
+	}
+	room.mu.Unlock()
+
+	signal := callSignalMessage{
+		OriginInstanceID: s.instanceID,
+		Type:             msg.Type,
+		Offer:            msg.Offer,
+	}
+	payload, err := json.Marshal(signal)
+	if err != nil {
+		log.Printf("Error marshaling call offer signal: %v", err)
+		return
+	}
+	if err := s.redisClient.Publish(context.Background(), "call_room:"+roomID, payload).Err(); err != nil {
+		log.Printf("Error publishing call offer signal: %v", err)
+	}
 }
-END_FILE:internal/usecase/invites/usecase.go
+
+func (s *service) handleAnswer(roomID string, room *Room, ws *websocket.Conn, msg Message) {
+	room.mu.Lock()
+	for client := range room.Clients {
+		if client != ws {
+			client.WriteJSON(msg)
+		}
+	}
+	room.mu.Unlock()
+
+	signal := callSignalMessage{
+		OriginInstanceID: s.instanceID,
+		Type:             msg.Type,
+		Answer:           msg.Answer,
+	}
+	payload, err := json.Marshal(signal)
+	if err != nil {
+		log.Printf("Error marshaling call answer signal: %v", err)
+		return
+	}
+	if err := s.redisClient.Publish(context.Background(), "call_room:"+roomID, payload).Err(); err != nil {
+		log.Printf("Error publishing call answer signal: %v", err)
+	}
+}
+
+func (s *service) handleCandidate(roomID string, room *Room, msg Message) {
+	room.mu.Lock()
+	if len(room.Clients) < 2 {
+		room.Candidates = append(room.Candidates, msg)
+		room.mu.Unlock()
+
+		s.publishCandidate(roomID, msg)
+		return
+	}
+
+	for client := range room.Clients {
+		client.WriteJSON(msg)
+	}
+	room.mu.Unlock()
+
+	s.publishCandidate(roomID, msg)
+}
+
+func (s *service) publishCandidate(roomID string, msg Message) {
+	signal := callSignalMessage{
+		OriginInstanceID: s.instanceID,
+		Type:             msg.Type,
+		Candidate:        msg.Candidate,
+	}
+	payload, err := json.Marshal(signal)
+	if err != nil {
+		log.Printf("Error marshaling call candidate signal: %v", err)
+		return
+	}
+	if err := s.redisClient.Publish(context.Background(), "call_room:"+roomID, payload).Err(); err != nil {
+		log.Printf("Error publishing call candidate signal: %v", err)
+	}
+}
+
+func (s *service) handleEndCall(roomID string, room *Room, ws *websocket.Conn) {
+	room.mu.Lock()
+	for client := range room.Clients {
+		if client != ws {
+			client.WriteJSON(Message{Type: "endCall"})
+		}
+	}
+	room.mu.Unlock()
+
+	signal := callSignalMessage{
+		OriginInstanceID: s.instanceID,
+		Type:             "endCall",
+	}
+	payload, err := json.Marshal(signal)
+	if err != nil {
+		log.Printf("Error marshaling call end signal: %v", err)
+		return
+	}
+	if err := s.redisClient.Publish(context.Background(), "call_room:"+roomID, payload).Err(); err != nil {
+		log.Printf("Error publishing call end signal: %v", err)
+	}
+}
+END_FILE:internal/usecase/calls/usecase.go
 # path: internal/adapters/repository/projects/gorm_repository.go | lang: go | tokens: 1476 | size: 5904
 # functions: NewGormRepository, toModel, toDomain, toDomainList
 BEGIN_FILE:internal/adapters/repository/projects/gorm_repository.go
@@ -10936,6 +11672,178 @@ type EmailVerification struct {
 
 
 END_FILE:internal/platform/database/models/user_model.go
+# path: internal/adapters/repository/invites/gorm_repository.go | lang: go | tokens: 1188 | size: 4755
+# functions: NewGormRepository, toModel, toDomain
+BEGIN_FILE:internal/adapters/repository/invites/gorm_repository.go
+package invites
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"gorm.io/gorm"
+
+	authDomain "server/internal/domain/auth"
+	employeesDomain "server/internal/domain/employees"
+	domain "server/internal/domain/invites"
+	"server/internal/platform/database/models"
+)
+
+type gormRepository struct {
+	db *gorm.DB
+}
+
+func NewGormRepository(db *gorm.DB) domain.Repository {
+	return &gormRepository{db: db}
+}
+
+func (r *gormRepository) Create(ctx context.Context, invite *domain.EmployeeInvite) error {
+	m := toModel(invite)
+	if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
+		return err
+	}
+	invite.ID = m.ID
+	invite.CreatedAt = m.CreatedAt
+	return nil
+}
+
+func (r *gormRepository) GetByToken(ctx context.Context, token string) (*domain.EmployeeInvite, error) {
+	var m models.EmployeeInvite
+	if err := r.db.WithContext(ctx).Where("token = ?", token).First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("invite not found")
+		}
+		return nil, err
+	}
+	return toDomain(&m), nil
+}
+
+func (r *gormRepository) GetByEmail(ctx context.Context, email string, orgID uint) (*domain.EmployeeInvite, error) {
+	var m models.EmployeeInvite
+	if err := r.db.WithContext(ctx).Where("email = ? AND organisation_id = ? AND status = ?", email, orgID, "pending").First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("invite not found")
+		}
+		return nil, err
+	}
+	return toDomain(&m), nil
+}
+
+func (r *gormRepository) MarkAccepted(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Model(&models.EmployeeInvite{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"status":      "accepted",
+			"accepted_at": time.Now(),
+		}).Error
+}
+
+func (r *gormRepository) GetByOrg(ctx context.Context, orgID uint) ([]domain.EmployeeInvite, error) {
+	var ms []models.EmployeeInvite
+	if err := r.db.WithContext(ctx).Where("organisation_id = ?", orgID).Order("created_at DESC").Find(&ms).Error; err != nil {
+		return nil, err
+	}
+	res := make([]domain.EmployeeInvite, len(ms))
+	for i, m := range ms {
+		res[i] = *toDomain(&m)
+	}
+	return res, nil
+}
+
+func (r *gormRepository) GetByID(ctx context.Context, id uint) (*domain.EmployeeInvite, error) {
+	var m models.EmployeeInvite
+	if err := r.db.WithContext(ctx).First(&m, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("invite not found")
+		}
+		return nil, err
+	}
+	return toDomain(&m), nil
+}
+
+func (r *gormRepository) Update(ctx context.Context, invite *domain.EmployeeInvite) error {
+	m := toModel(invite)
+	return r.db.WithContext(ctx).Save(m).Error
+}
+
+
+func (r *gormRepository) AcceptInvite(ctx context.Context, inviteID uint, u *authDomain.User, emp *employeesDomain.Employee) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		userModel := &models.UserModel{
+			FirstName:      u.FirstName,
+			LastName:       u.LastName,
+			Email:          u.Email,
+			PhoneNumber:    u.PhoneNumber,
+			IsVerified:     u.IsVerified,
+			HashedPassword: u.HashedPassword,
+		}
+		userModel.ID = u.ID
+		if err := tx.Save(userModel).Error; err != nil {
+			return err
+		}
+		u.ID = userModel.ID
+		emp.UserID = userModel.ID
+
+		employeeModel := &models.Employee{
+			UserID:         emp.UserID,
+			EmploymentID:   emp.EmploymentID,
+			OrganisationID: emp.OrganisationID,
+			Email:          emp.Email,
+		}
+		if err := tx.Create(employeeModel).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&models.EmployeeInvite{}).
+			Where("id = ?", inviteID).
+			Updates(map[string]interface{}{
+				"status":      "accepted",
+				"accepted_at": time.Now(),
+			}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+func toModel(invite *domain.EmployeeInvite) *models.EmployeeInvite {
+	m := &models.EmployeeInvite{
+		Token:           invite.Token,
+		Email:           invite.Email,
+		FirstName:       invite.FirstName,
+		LastName:        invite.LastName,
+		PhoneNumber:     invite.PhoneNumber,
+		EmploymentID:    invite.EmploymentID,
+		OrganisationID:  invite.OrganisationID,
+		InvitedByUserID: invite.InvitedByUserID,
+		Status:          invite.Status,
+		ExpiresAt:       invite.ExpiresAt,
+		AcceptedAt:      invite.AcceptedAt,
+	}
+	m.ID = invite.ID
+	return m
+}
+
+func toDomain(m *models.EmployeeInvite) *domain.EmployeeInvite {
+	return &domain.EmployeeInvite{
+		ID:              m.ID,
+		Token:           m.Token,
+		Email:           m.Email,
+		FirstName:       m.FirstName,
+		LastName:        m.LastName,
+		PhoneNumber:     m.PhoneNumber,
+		EmploymentID:    m.EmploymentID,
+		OrganisationID:  m.OrganisationID,
+		InvitedByUserID: m.InvitedByUserID,
+		Status:          m.Status,
+		ExpiresAt:       m.ExpiresAt,
+		CreatedAt:       m.CreatedAt,
+		AcceptedAt:      m.AcceptedAt,
+	}
+}
+END_FILE:internal/adapters/repository/invites/gorm_repository.go
 # path: internal/platform/middlewares/auth_validator_middleware.go | lang: go | tokens: 1176 | size: 4707
 # functions: ValidateToken, setRoleAndOrgFromClaims, normaliseRole, RoleMiddleware
 BEGIN_FILE:internal/platform/middlewares/auth_validator_middleware.go
@@ -11570,6 +12478,179 @@ func TestCancelLeave_Unauthorized(t *testing.T) {
 	}
 }
 END_FILE:internal/usecase/leave/usecase_test.go
+# path: internal/adapters/http/invites/handler.go | lang: go | tokens: 1113 | size: 4455
+# functions: NewHandler, getUserAuthInfo
+BEGIN_FILE:internal/adapters/http/invites/handler.go
+package invites
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+
+	domain "server/internal/domain/invites"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func getUserAuthInfo(c *gin.Context) (uint, uint, string, bool) {
+	userIDVal, existsUser := c.Get("userID")
+	orgIDVal, existsOrg := c.Get("organisationID")
+	roleVal, existsRole := c.Get("role")
+	if !existsUser || !existsOrg || !existsRole {
+		return 0, 0, "", false
+	}
+	userID, okUser := userIDVal.(uint)
+	orgID, okOrg := orgIDVal.(uint)
+	role, okRole := roleVal.(string)
+	if !okUser || !okOrg || !okRole {
+		return 0, 0, "", false
+	}
+	return userID, orgID, role, true
+}
+
+func (h *Handler) InviteEmployee(c *gin.Context) {
+	userID, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	if role != "boss" && role != "manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
+		return
+	}
+
+	var req struct {
+		Email        string `json:"email" binding:"required,email"`
+		FirstName    string `json:"first_name" binding:"required"`
+		LastName     string `json:"last_name" binding:"required"`
+		PhoneNumber  string `json:"phone_number"`
+		EmploymentID int    `json:"employment_id" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	invite := &domain.EmployeeInvite{
+		Email:           req.Email,
+		FirstName:       req.FirstName,
+		LastName:        req.LastName,
+		PhoneNumber:     req.PhoneNumber,
+		EmploymentID:    req.EmploymentID,
+		OrganisationID:  orgID,
+		InvitedByUserID: userID,
+	}
+
+	if err := h.uc.InviteEmployee(c.Request.Context(), invite); err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Invitation sent successfully"})
+}
+
+func (h *Handler) AcceptInvite(c *gin.Context) {
+	var req struct {
+		Token    string `json:"token" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	pair, err := h.uc.AcceptInvite(c.Request.Context(), req.Token, req.Password)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Authorization", pair.AccessToken)
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Invitation accepted successfully",
+		"access_token":  pair.AccessToken,
+		"refresh_token": pair.RefreshToken,
+	})
+}
+
+func (h *Handler) GetInvites(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	if role != "boss" && role != "manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
+		return
+	}
+
+	invites, err := h.uc.GetInvitesByOrg(c.Request.Context(), orgID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"invites": invites})
+}
+
+func (h *Handler) ResendInvite(c *gin.Context) {
+	_, orgID, role, ok := getUserAuthInfo(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	if role != "boss" && role != "manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
+		return
+	}
+
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.uc.ResendInvite(c.Request.Context(), req.Email, orgID); err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "unauthorized") {
+			c.JSON(http.StatusForbidden, gin.H{"error": errMsg})
+			return
+		}
+		if strings.Contains(errMsg, "cannot resend") {
+			c.JSON(http.StatusConflict, gin.H{"error": errMsg})
+			return
+		}
+		if strings.Contains(errMsg, "not found") {
+			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Invitation email resent successfully"})
+}
+END_FILE:internal/adapters/http/invites/handler.go
 # path: internal/adapters/repository/organisation/gorm_repository.go | lang: go | tokens: 1100 | size: 4403
 # functions: NewGormRepository, toModel, toEntity
 BEGIN_FILE:internal/adapters/repository/organisation/gorm_repository.go
@@ -11869,161 +12950,6 @@ type PeopleListContact struct {
 	Contact   PeopleContact `gorm:"foreignKey:ContactID;constraint:OnDelete:CASCADE;"`
 }
 END_FILE:internal/platform/database/models/people_models.go
-# path: internal/adapters/repository/invites/gorm_repository.go | lang: go | tokens: 1063 | size: 4254
-# functions: NewGormRepository, toModel, toDomain
-BEGIN_FILE:internal/adapters/repository/invites/gorm_repository.go
-package invites
-
-import (
-	"context"
-	"errors"
-	"time"
-
-	"gorm.io/gorm"
-
-	authDomain "server/internal/domain/auth"
-	employeesDomain "server/internal/domain/employees"
-	domain "server/internal/domain/invites"
-	"server/internal/platform/database/models"
-)
-
-type gormRepository struct {
-	db *gorm.DB
-}
-
-func NewGormRepository(db *gorm.DB) domain.Repository {
-	return &gormRepository{db: db}
-}
-
-func (r *gormRepository) Create(ctx context.Context, invite *domain.EmployeeInvite) error {
-	m := toModel(invite)
-	if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
-		return err
-	}
-	invite.ID = m.ID
-	invite.CreatedAt = m.CreatedAt
-	return nil
-}
-
-func (r *gormRepository) GetByToken(ctx context.Context, token string) (*domain.EmployeeInvite, error) {
-	var m models.EmployeeInvite
-	if err := r.db.WithContext(ctx).Where("token = ?", token).First(&m).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("invite not found")
-		}
-		return nil, err
-	}
-	return toDomain(&m), nil
-}
-
-func (r *gormRepository) GetByEmail(ctx context.Context, email string, orgID uint) (*domain.EmployeeInvite, error) {
-	var m models.EmployeeInvite
-	if err := r.db.WithContext(ctx).Where("email = ? AND organisation_id = ? AND status = ?", email, orgID, "pending").First(&m).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("invite not found")
-		}
-		return nil, err
-	}
-	return toDomain(&m), nil
-}
-
-func (r *gormRepository) MarkAccepted(ctx context.Context, id uint) error {
-	return r.db.WithContext(ctx).Model(&models.EmployeeInvite{}).
-		Where("id = ?", id).
-		Updates(map[string]interface{}{
-			"status":      "accepted",
-			"accepted_at": time.Now(),
-		}).Error
-}
-
-func (r *gormRepository) GetByOrg(ctx context.Context, orgID uint) ([]domain.EmployeeInvite, error) {
-	var ms []models.EmployeeInvite
-	if err := r.db.WithContext(ctx).Where("organisation_id = ?", orgID).Order("created_at DESC").Find(&ms).Error; err != nil {
-		return nil, err
-	}
-	res := make([]domain.EmployeeInvite, len(ms))
-	for i, m := range ms {
-		res[i] = *toDomain(&m)
-	}
-	return res, nil
-}
-
-func (r *gormRepository) AcceptInvite(ctx context.Context, inviteID uint, u *authDomain.User, emp *employeesDomain.Employee) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		userModel := &models.UserModel{
-			FirstName:      u.FirstName,
-			LastName:       u.LastName,
-			Email:          u.Email,
-			PhoneNumber:    u.PhoneNumber,
-			IsVerified:     u.IsVerified,
-			HashedPassword: u.HashedPassword,
-		}
-		userModel.ID = u.ID
-		if err := tx.Save(userModel).Error; err != nil {
-			return err
-		}
-		u.ID = userModel.ID
-		emp.UserID = userModel.ID
-
-		employeeModel := &models.Employee{
-			UserID:         emp.UserID,
-			EmploymentID:   emp.EmploymentID,
-			OrganisationID: emp.OrganisationID,
-			Email:          emp.Email,
-		}
-		if err := tx.Create(employeeModel).Error; err != nil {
-			return err
-		}
-
-		if err := tx.Model(&models.EmployeeInvite{}).
-			Where("id = ?", inviteID).
-			Updates(map[string]interface{}{
-				"status":      "accepted",
-				"accepted_at": time.Now(),
-			}).Error; err != nil {
-			return err
-		}
-
-		return nil
-	})
-}
-
-func toModel(invite *domain.EmployeeInvite) *models.EmployeeInvite {
-	m := &models.EmployeeInvite{
-		Token:           invite.Token,
-		Email:           invite.Email,
-		FirstName:       invite.FirstName,
-		LastName:        invite.LastName,
-		PhoneNumber:     invite.PhoneNumber,
-		EmploymentID:    invite.EmploymentID,
-		OrganisationID:  invite.OrganisationID,
-		InvitedByUserID: invite.InvitedByUserID,
-		Status:          invite.Status,
-		ExpiresAt:       invite.ExpiresAt,
-		AcceptedAt:      invite.AcceptedAt,
-	}
-	m.ID = invite.ID
-	return m
-}
-
-func toDomain(m *models.EmployeeInvite) *domain.EmployeeInvite {
-	return &domain.EmployeeInvite{
-		ID:              m.ID,
-		Token:           m.Token,
-		Email:           m.Email,
-		FirstName:       m.FirstName,
-		LastName:        m.LastName,
-		PhoneNumber:     m.PhoneNumber,
-		EmploymentID:    m.EmploymentID,
-		OrganisationID:  m.OrganisationID,
-		InvitedByUserID: m.InvitedByUserID,
-		Status:          m.Status,
-		ExpiresAt:       m.ExpiresAt,
-		CreatedAt:       m.CreatedAt,
-		AcceptedAt:      m.AcceptedAt,
-	}
-}
-END_FILE:internal/adapters/repository/invites/gorm_repository.go
 # path: internal/adapters/http/callstate/handler.go | lang: go | tokens: 1005 | size: 4022
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/callstate/handler.go
@@ -12959,137 +13885,6 @@ func toDomainList(modelsList []models.Attendance) []domain.Attendance {
 	return result
 }
 END_FILE:internal/adapters/repository/attendance/gorm_repository.go
-# path: internal/adapters/http/invites/handler.go | lang: go | tokens: 829 | size: 3317
-# functions: NewHandler, getUserAuthInfo
-BEGIN_FILE:internal/adapters/http/invites/handler.go
-package invites
-
-import (
-	"net/http"
-	"strings"
-
-	"github.com/gin-gonic/gin"
-
-	domain "server/internal/domain/invites"
-)
-
-type Handler struct {
-	uc domain.UseCase
-}
-
-func NewHandler(uc domain.UseCase) *Handler {
-	return &Handler{uc: uc}
-}
-
-func getUserAuthInfo(c *gin.Context) (uint, uint, string, bool) {
-	userIDVal, existsUser := c.Get("userID")
-	orgIDVal, existsOrg := c.Get("organisationID")
-	roleVal, existsRole := c.Get("role")
-	if !existsUser || !existsOrg || !existsRole {
-		return 0, 0, "", false
-	}
-	userID, okUser := userIDVal.(uint)
-	orgID, okOrg := orgIDVal.(uint)
-	role, okRole := roleVal.(string)
-	if !okUser || !okOrg || !okRole {
-		return 0, 0, "", false
-	}
-	return userID, orgID, role, true
-}
-
-func (h *Handler) InviteEmployee(c *gin.Context) {
-	userID, orgID, role, ok := getUserAuthInfo(c)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
-	}
-
-	if role != "boss" && role != "manager" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
-		return
-	}
-
-	var req struct {
-		Email        string `json:"email" binding:"required,email"`
-		FirstName    string `json:"first_name" binding:"required"`
-		LastName     string `json:"last_name" binding:"required"`
-		PhoneNumber  string `json:"phone_number"`
-		EmploymentID int    `json:"employment_id" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	invite := &domain.EmployeeInvite{
-		Email:           req.Email,
-		FirstName:       req.FirstName,
-		LastName:        req.LastName,
-		PhoneNumber:     req.PhoneNumber,
-		EmploymentID:    req.EmploymentID,
-		OrganisationID:  orgID,
-		InvitedByUserID: userID,
-	}
-
-	if err := h.uc.InviteEmployee(c.Request.Context(), invite); err != nil {
-		if strings.Contains(err.Error(), "already exists") {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Invitation sent successfully"})
-}
-
-func (h *Handler) AcceptInvite(c *gin.Context) {
-	var req struct {
-		Token    string `json:"token" binding:"required"`
-		Password string `json:"password" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	pair, err := h.uc.AcceptInvite(c.Request.Context(), req.Token, req.Password)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.Header("Authorization", pair.AccessToken)
-	c.JSON(http.StatusOK, gin.H{
-		"message":       "Invitation accepted successfully",
-		"access_token":  pair.AccessToken,
-		"refresh_token": pair.RefreshToken,
-	})
-}
-
-func (h *Handler) GetInvites(c *gin.Context) {
-	_, orgID, role, ok := getUserAuthInfo(c)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
-	}
-
-	if role != "boss" && role != "manager" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Insufficient permissions"})
-		return
-	}
-
-	invites, err := h.uc.GetInvitesByOrg(c.Request.Context(), orgID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"invites": invites})
-}
-END_FILE:internal/adapters/http/invites/handler.go
 # path: internal/usecase/attendance/usecase.go | lang: go | tokens: 813 | size: 3252
 # functions: NewService
 BEGIN_FILE:internal/usecase/attendance/usecase.go
@@ -13213,124 +14008,6 @@ func (s *service) GetEmployeeAttendanceHistory(ctx context.Context, userID uint,
 	}, nil
 }
 END_FILE:internal/usecase/attendance/usecase.go
-# path: internal/adapters/http/teams/handler.go | lang: go | tokens: 806 | size: 3227
-# functions: NewHandler
-BEGIN_FILE:internal/adapters/http/teams/handler.go
-package teams
-
-import (
-	"net/http"
-	domain "server/internal/domain/teams"
-	"strconv"
-
-	"github.com/gin-gonic/gin"
-)
-
-type Handler struct {
-	uc domain.UseCase
-}
-
-func NewHandler(uc domain.UseCase) *Handler {
-	return &Handler{uc: uc}
-}
-
-func (h *Handler) CreateTeam(c *gin.Context) {
-	var req struct {
-		Name           string `json:"name"`
-		Description    string `json:"description"`
-		OrganisationID uint   `json:"organisation_id"`
-		CreatedBy      uint   `json:"created_by"`
-		TeamLead       uint   `json:"team_lead"`
-		Members        []uint `json:"members"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid request body", "error": err.Error()})
-		return
-	}
-
-	team := &domain.Team{
-		Name:           req.Name,
-		Description:    req.Description,
-		OrganisationID: req.OrganisationID,
-		CreatedBy:      req.CreatedBy,
-		TeamLead:       req.TeamLead,
-	}
-
-	if err := h.uc.CreateTeam(c.Request.Context(), team, req.Members); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create team", "message": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Team created successfully", "team": team})
-}
-
-func (h *Handler) GetTeam(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
-		return
-	}
-
-	team, members, err := h.uc.GetTeam(c.Request.Context(), uint(id))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get team", "message": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Team fetched successfully", "team": team, "team_members": members})
-}
-
-func (h *Handler) GetTeamsByOrganisation(c *gin.Context) {
-	orgID, err := strconv.Atoi(c.Param("organisation_id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
-		return
-	}
-
-	teams, err := h.uc.GetTeamsByOrganisation(c.Request.Context(), uint(orgID))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get teams", "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Teams fetched successfully", "teams": teams})
-}
-
-func (h *Handler) UpdateTeam(c *gin.Context) {
-	var team domain.Team
-	if err := c.BindJSON(&team); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
-		return
-	}
-	team.ID = uint(id)
-
-	if err := h.uc.UpdateTeam(c.Request.Context(), &team); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update team"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Team updated successfully"})
-}
-
-func (h *Handler) DeleteTeam(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
-		return
-	}
-
-	if err := h.uc.DeleteTeam(c.Request.Context(), uint(id)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete team"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Team deleted successfully"})
-}
-END_FILE:internal/adapters/http/teams/handler.go
 # path: internal/adapters/http/attendance/handler.go | lang: go | tokens: 806 | size: 3227
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/attendance/handler.go
@@ -13453,6 +14130,253 @@ func (h *Handler) GetEmployeeAttendanceHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, history)
 }
 END_FILE:internal/adapters/http/attendance/handler.go
+# path: internal/adapters/http/teams/handler.go | lang: go | tokens: 806 | size: 3227
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/teams/handler.go
+package teams
+
+import (
+	"net/http"
+	domain "server/internal/domain/teams"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) CreateTeam(c *gin.Context) {
+	var req struct {
+		Name           string `json:"name"`
+		Description    string `json:"description"`
+		OrganisationID uint   `json:"organisation_id"`
+		CreatedBy      uint   `json:"created_by"`
+		TeamLead       uint   `json:"team_lead"`
+		Members        []uint `json:"members"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid request body", "error": err.Error()})
+		return
+	}
+
+	team := &domain.Team{
+		Name:           req.Name,
+		Description:    req.Description,
+		OrganisationID: req.OrganisationID,
+		CreatedBy:      req.CreatedBy,
+		TeamLead:       req.TeamLead,
+	}
+
+	if err := h.uc.CreateTeam(c.Request.Context(), team, req.Members); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create team", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Team created successfully", "team": team})
+}
+
+func (h *Handler) GetTeam(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+
+	team, members, err := h.uc.GetTeam(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get team", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Team fetched successfully", "team": team, "team_members": members})
+}
+
+func (h *Handler) GetTeamsByOrganisation(c *gin.Context) {
+	orgID, err := strconv.Atoi(c.Param("organisation_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid organisation ID"})
+		return
+	}
+
+	teams, err := h.uc.GetTeamsByOrganisation(c.Request.Context(), uint(orgID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get teams", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Teams fetched successfully", "teams": teams})
+}
+
+func (h *Handler) UpdateTeam(c *gin.Context) {
+	var team domain.Team
+	if err := c.BindJSON(&team); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+	team.ID = uint(id)
+
+	if err := h.uc.UpdateTeam(c.Request.Context(), &team); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update team"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Team updated successfully"})
+}
+
+func (h *Handler) DeleteTeam(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid team ID"})
+		return
+	}
+
+	if err := h.uc.DeleteTeam(c.Request.Context(), uint(id)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete team"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Team deleted successfully"})
+}
+END_FILE:internal/adapters/http/teams/handler.go
+# path: internal/platform/websocket/manager.go | lang: go | tokens: 773 | size: 3094
+# functions: NewManager
+BEGIN_FILE:internal/platform/websocket/manager.go
+package websocket
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// Envelope is the standard JSON structure for all WebSocket messages
+type Envelope struct {
+	Type    string      `json:"type"`
+	Payload interface{} `json:"payload"`
+}
+
+// Manager handles application-level WebSocket operations using the Hub
+type Manager struct {
+	Hub         *Hub
+	RedisClient *redis.Client
+	Channel     string
+}
+
+// NewManager creates a new WebSocketManager
+func NewManager(hub *Hub, redisClient *redis.Client, channel string) *Manager {
+	return &Manager{
+		Hub:         hub,
+		RedisClient: redisClient,
+		Channel:     channel,
+	}
+}
+
+type managerPubSubMessage struct {
+	TargetUserID string `json:"target_user_id"`
+	TargetRoomID string `json:"target_room_id"`
+	Payload      []byte `json:"payload"`
+}
+
+// SendToUser marshals the payload into an envelope and sends it to the specific user via the Hub
+func (m *Manager) SendToUser(userID string, eventType string, payload interface{}) error {
+	envelope := Envelope{
+		Type:    eventType,
+		Payload: payload,
+	}
+
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("failed to marshal websocket envelope: %w", err)
+	}
+
+	pubMsg := managerPubSubMessage{
+		TargetUserID: userID,
+		Payload:      data,
+	}
+
+	msgData, err := json.Marshal(pubMsg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pubsub message: %w", err)
+	}
+
+	// Publish to Redis channel with background context
+	err = m.RedisClient.Publish(context.Background(), m.Channel, msgData).Err()
+	if err != nil {
+		log.Printf("Error publishing websocket message to Redis: %v", err)
+		m.Hub.Broadcast <- &HubMessage{
+			TargetUserID: userID,
+			Payload:      data,
+		}
+	}
+
+	return nil
+}
+
+// SendToRoom marshals the payload into an envelope and sends it to all clients in the room via the Hub
+func (m *Manager) SendToRoom(roomID string, eventType string, payload interface{}) error {
+	envelope := Envelope{
+		Type:    eventType,
+		Payload: payload,
+	}
+
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("failed to marshal websocket envelope: %w", err)
+	}
+
+	pubMsg := managerPubSubMessage{
+		TargetRoomID: roomID,
+		Payload:      data,
+	}
+
+	msgData, err := json.Marshal(pubMsg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pubsub message: %w", err)
+	}
+
+	// Publish to Redis channel with background context
+	err = m.RedisClient.Publish(context.Background(), m.Channel, msgData).Err()
+	if err != nil {
+		log.Printf("Error publishing room message to Redis: %v", err)
+		m.Hub.Broadcast <- &HubMessage{
+			TargetRoomID: roomID,
+			Payload:      data,
+		}
+	}
+
+	return nil
+}
+
+// IsOnline checks if a specific user is currently connected to the WebSocket
+func (m *Manager) IsOnline(userID string) bool {
+	return m.Hub.IsOnline(userID)
+}
+
+// GetOnlineUsers filters a list of user IDs to return only those currently online
+func (m *Manager) GetOnlineUsers(userIDs []string) []string {
+	online := make([]string, 0)
+	for _, id := range userIDs {
+		if m.IsOnline(id) {
+			online = append(online, id)
+		}
+	}
+	return online
+}
+
+END_FILE:internal/platform/websocket/manager.go
 # path: internal/platform/websocket/hub.go | lang: go | tokens: 757 | size: 3029
 # functions: NewHub
 BEGIN_FILE:internal/platform/websocket/hub.go
@@ -13984,7 +14908,7 @@ type NotificationPreferenceEntry struct {
 	InApp    bool   `json:"in_app"`
 }
 END_FILE:internal/domain/settings/entity.go
-# path: internal/platform/database/init.go | lang: go | tokens: 680 | size: 2720
+# path: internal/platform/database/init.go | lang: go | tokens: 675 | size: 2700
 # functions: Init, initDB, PerformMigrations
 BEGIN_FILE:internal/platform/database/init.go
 package database
@@ -14058,7 +14982,6 @@ func PerformMigrations() error {
 		&models.TaskActivity{},
 		&models.WorkSchedule{},
 		&models.AuditLog{},
-		&models.Invite{},
 		&models.EmployeeInvite{},
 		&models.EmailVerification{},
 		&models.ResourceCollection{},
@@ -14288,146 +15211,100 @@ func (h *Handler) UpdateOrganisation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"organisation": org})
 }
 END_FILE:internal/adapters/http/organisation/handler.go
-# path: internal/usecase/calls/usecase.go | lang: go | tokens: 642 | size: 2570
-# functions: NewService
-BEGIN_FILE:internal/usecase/calls/usecase.go
-package calls
+# path: internal/adapters/repository/analytics/redis_cache_repository.go | lang: go | tokens: 645 | size: 2583
+# functions: NewCachedRepository
+BEGIN_FILE:internal/adapters/repository/analytics/redis_cache_repository.go
+package analytics
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
-	"sync"
-	domain "server/internal/domain/calls"
-	"github.com/gorilla/websocket"
+	"time"
+
+	domain "server/internal/domain/analytics"
+
+	"github.com/redis/go-redis/v9"
 )
 
-type Room struct {
-	Offer      *Message
-	Clients    map[*websocket.Conn]bool
-	Candidates []Message
-	mu         sync.Mutex
+type cachedRepository struct {
+	client *redis.Client
+	inner  domain.Repository
+	ttl    time.Duration
 }
 
-type Message struct {
-	Type      string      `json:"type"`
-	Offer     interface{} `json:"offer,omitempty"`
-	Answer    interface{} `json:"answer,omitempty"`
-	Candidate interface{} `json:"candidate,omitempty"`
+// NewCachedRepository wraps an analytics Repository with a Redis caching layer.
+func NewCachedRepository(client *redis.Client, inner domain.Repository, ttl time.Duration) domain.Repository {
+	return &cachedRepository{
+		client: client,
+		inner:  inner,
+		ttl:    ttl,
+	}
 }
 
-var rooms = make(map[string]*Room)
-var roomsMu sync.Mutex
+func (r *cachedRepository) GetEmployeeAnalytics(ctx context.Context, userID uint, orgID uint, period string) (*domain.EmployeeAnalyticsSummary, error) {
+	key := fmt.Sprintf("analytics:employee:%d:%d:%s", userID, orgID, period)
 
-type service struct{}
-
-func NewService() domain.UseCase {
-	return &service{}
-}
-
-func (s *service) HandleRoom(ctx context.Context, roomID string, ws *websocket.Conn) {
-	log.Printf("Client joined room: %s", roomID)
-
-	roomsMu.Lock()
-	room, ok := rooms[roomID]
-	if !ok {
-		room = &Room{
-			Clients:    make(map[*websocket.Conn]bool),
-			Candidates: []Message{},
+	cachedVal, err := r.client.Get(ctx, key).Result()
+	if err == nil {
+		var summary domain.EmployeeAnalyticsSummary
+		if err := json.Unmarshal([]byte(cachedVal), &summary); err == nil {
+			return &summary, nil
 		}
-		rooms[roomID] = room
-	}
-	roomsMu.Unlock()
-
-	if room.Offer != nil {
-		log.Print("Sending offer to client")
-		ws.WriteJSON(*room.Offer)
+		log.Printf("Error unmarshaling cached employee analytics: %v", err)
+	} else if err != redis.Nil {
+		log.Printf("Redis error getting cached employee analytics: %v", err)
 	}
 
-	room.mu.Lock()
-	room.Clients[ws] = true
-	room.mu.Unlock()
-
-	defer func() {
-		room.mu.Lock()
-		delete(room.Clients, ws)
-		if len(room.Clients) == 0 {
-			roomsMu.Lock()
-			delete(rooms, roomID)
-			roomsMu.Unlock()
-		}
-		room.mu.Unlock()
-		ws.Close()
-	}()
-
-	for {
-		var msg Message
-		err := ws.ReadJSON(&msg)
-		if err != nil {
-			log.Printf("Error reading message from room %s: %v", roomID, err)
-			break
-		}
-
-		switch msg.Type {
-		case "offer":
-			s.handleOffer(room, ws, msg)
-		case "answer":
-			s.handleAnswer(room, ws, msg)
-		case "candidate":
-			s.handleCandidate(room, msg)
-		case "endCall":
-			s.handleEndCall(room, ws)
-		}
+	summary, err := r.inner.GetEmployeeAnalytics(ctx, userID, orgID, period)
+	if err != nil {
+		return nil, err
 	}
+
+	summaryBytes, err := json.Marshal(summary)
+	if err == nil {
+		if err := r.client.Set(ctx, key, summaryBytes, r.ttl).Err(); err != nil {
+			log.Printf("Redis error setting cached employee analytics: %v", err)
+		}
+	} else {
+		log.Printf("Error marshaling employee analytics for cache: %v", err)
+	}
+
+	return summary, nil
 }
 
-func (s *service) handleOffer(room *Room, ws *websocket.Conn, msg Message) {
-	room.mu.Lock()
-	defer room.mu.Unlock()
+func (r *cachedRepository) GetOrgEmployeeMonitor(ctx context.Context, orgID uint) ([]domain.EmployeeMonitorResponse, error) {
+	key := fmt.Sprintf("analytics:org_monitor:%d", orgID)
 
-	room.Offer = &msg
-	for client := range room.Clients {
-		if client != ws {
-			client.WriteJSON(msg)
+	cachedVal, err := r.client.Get(ctx, key).Result()
+	if err == nil {
+		var monitor []domain.EmployeeMonitorResponse
+		if err := json.Unmarshal([]byte(cachedVal), &monitor); err == nil {
+			return monitor, nil
 		}
+		log.Printf("Error unmarshaling cached org employee monitor: %v", err)
+	} else if err != redis.Nil {
+		log.Printf("Redis error getting cached org employee monitor: %v", err)
 	}
-}
 
-func (s *service) handleAnswer(room *Room, ws *websocket.Conn, msg Message) {
-	room.mu.Lock()
-	defer room.mu.Unlock()
+	monitor, err := r.inner.GetOrgEmployeeMonitor(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
 
-	for client := range room.Clients {
-		if client != ws {
-			client.WriteJSON(msg)
+	monitorBytes, err := json.Marshal(monitor)
+	if err == nil {
+		if err := r.client.Set(ctx, key, monitorBytes, r.ttl).Err(); err != nil {
+			log.Printf("Redis error setting cached org employee monitor: %v", err)
 		}
+	} else {
+		log.Printf("Error marshaling org employee monitor for cache: %v", err)
 	}
+
+	return monitor, nil
 }
-
-func (s *service) handleCandidate(room *Room, msg Message) {
-	room.mu.Lock()
-	defer room.mu.Unlock()
-
-	if len(room.Clients) < 2 {
-		room.Candidates = append(room.Candidates, msg)
-		return
-	}
-
-	for client := range room.Clients {
-		client.WriteJSON(msg)
-	}
-}
-
-func (s *service) handleEndCall(room *Room, ws *websocket.Conn) {
-	room.mu.Lock()
-	defer room.mu.Unlock()
-
-	for client := range room.Clients {
-		if client != ws {
-			client.WriteJSON(Message{Type: "endCall"})
-		}
-	}
-}
-END_FILE:internal/usecase/calls/usecase.go
+END_FILE:internal/adapters/repository/analytics/redis_cache_repository.go
 # path: internal/platform/database/models/organisation_model.go | lang: go | tokens: 628 | size: 2515
 BEGIN_FILE:internal/platform/database/models/organisation_model.go
 package models
@@ -15801,6 +16678,88 @@ type Repository interface {
 	HasContactsInStage(ctx context.Context, stageID uint, orgID uint) (bool, error)
 }
 END_FILE:internal/domain/people/repository.go
+# path: internal/adapters/repository/search/redis_cache_repository.go | lang: go | tokens: 485 | size: 1943
+# functions: NewCachedRepository
+BEGIN_FILE:internal/adapters/repository/search/redis_cache_repository.go
+package search
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"sort"
+	"strings"
+	"time"
+
+	domain "server/internal/domain/search"
+
+	"github.com/redis/go-redis/v9"
+)
+
+type cachedRepository struct {
+	client *redis.Client
+	inner  domain.Repository
+	ttl    time.Duration
+}
+
+// NewCachedRepository wraps a search Repository with a Redis caching layer.
+func NewCachedRepository(client *redis.Client, inner domain.Repository, ttl time.Duration) domain.Repository {
+	return &cachedRepository{
+		client: client,
+		inner:  inner,
+		ttl:    ttl,
+	}
+}
+
+// Search retrieves results from Redis cache or queries the database on miss.
+func (r *cachedRepository) Search(ctx context.Context, filters *domain.SearchFilters) (*domain.SearchResults, error) {
+	sortedTypes := make([]string, len(filters.Types))
+	copy(sortedTypes, filters.Types)
+	sort.Strings(sortedTypes)
+	typesStr := strings.Join(sortedTypes, ",")
+
+	queryStr := strings.TrimSpace(strings.ToLower(filters.Query))
+	key := fmt.Sprintf("search:%d:%s:%s:%d:%d",
+		filters.OrganisationID,
+		queryStr,
+		typesStr,
+		filters.Limit,
+		filters.Offset,
+	)
+
+	// Attempt to get from cache
+	cachedVal, err := r.client.Get(ctx, key).Result()
+	if err == nil {
+		var results domain.SearchResults
+		if err := json.Unmarshal([]byte(cachedVal), &results); err == nil {
+			return &results, nil
+		}
+		log.Printf("Error unmarshaling search cache results: %v", err)
+	} else if err != redis.Nil {
+		log.Printf("Redis error getting search cache key: %v", err)
+	}
+
+	// Database lookup on miss or error
+	results, err := r.inner.Search(ctx, filters)
+	if err != nil {
+		return nil, err
+	}
+
+	// Write back to cache
+	resultsBytes, err := json.Marshal(results)
+	if err == nil {
+		err = r.client.Set(ctx, key, resultsBytes, r.ttl).Err()
+		if err != nil {
+			log.Printf("Redis error setting search cache key: %v", err)
+		}
+	} else {
+		log.Printf("Error marshaling search results for cache: %v", err)
+	}
+
+	return results, nil
+}
+END_FILE:internal/adapters/repository/search/redis_cache_repository.go
 # path: internal/platform/database/models/research_model.go | lang: go | tokens: 477 | size: 1908
 BEGIN_FILE:internal/platform/database/models/research_model.go
 package models
@@ -15942,86 +16901,6 @@ func StartSubscriber(ctx context.Context, redisClient *redis.Client, channel str
 	}
 }
 END_FILE:internal/platform/websocket/redis_broadcaster.go
-# path: internal/platform/websocket/manager.go | lang: go | tokens: 463 | size: 1855
-# functions: NewManager
-BEGIN_FILE:internal/platform/websocket/manager.go
-package websocket
-
-import (
-	"encoding/json"
-	"fmt"
-)
-
-// Envelope is the standard JSON structure for all WebSocket messages
-type Envelope struct {
-	Type    string      `json:"type"`
-	Payload interface{} `json:"payload"`
-}
-
-// Manager handles application-level WebSocket operations using the Hub
-type Manager struct {
-	Hub *Hub
-}
-
-// NewManager creates a new WebSocketManager
-func NewManager(hub *Hub) *Manager {
-	return &Manager{Hub: hub}
-}
-
-// SendToUser marshals the payload into an envelope and sends it to the specific user via the Hub
-func (m *Manager) SendToUser(userID string, eventType string, payload interface{}) error {
-	envelope := Envelope{
-		Type:    eventType,
-		Payload: payload,
-	}
-
-	data, err := json.Marshal(envelope)
-	if err != nil {
-		return fmt.Errorf("failed to marshal websocket envelope: %w", err)
-	}
-
-	m.Hub.Broadcast <- &HubMessage{
-		TargetUserID: userID,
-		Payload:      data,
-	}
-
-	return nil
-}
-// SendToRoom marshals the payload into an envelope and sends it to all clients in the room via the Hub
-func (m *Manager) SendToRoom(roomID string, eventType string, payload interface{}) error {
-	envelope := Envelope{
-		Type:    eventType,
-		Payload: payload,
-	}
-
-	data, err := json.Marshal(envelope)
-	if err != nil {
-		return fmt.Errorf("failed to marshal websocket envelope: %w", err)
-	}
-
-	m.Hub.Broadcast <- &HubMessage{
-		TargetRoomID: roomID,
-		Payload:      data,
-	}
-
-	return nil
-}
-// IsOnline checks if a specific user is currently connected to the WebSocket
-func (m *Manager) IsOnline(userID string) bool {
-	return m.Hub.IsOnline(userID)
-}
-
-// GetOnlineUsers filters a list of user IDs to return only those currently online
-func (m *Manager) GetOnlineUsers(userIDs []string) []string {
-	online := make([]string, 0)
-	for _, id := range userIDs {
-		if m.IsOnline(id) {
-			online = append(online, id)
-		}
-	}
-	return online
-}
-END_FILE:internal/platform/websocket/manager.go
 # path: internal/domain/resources/repository.go | lang: go | tokens: 455 | size: 1822
 # imports: context
 BEGIN_FILE:internal/domain/resources/repository.go
@@ -16693,73 +17572,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/settings/routes.go
-# path: internal/adapters/http/files/handler.go | lang: go | tokens: 359 | size: 1436
-# functions: NewHandler
-BEGIN_FILE:internal/adapters/http/files/handler.go
-package files
-
-import (
-	"io"
-	"net/http"
-	domain "server/internal/domain/files"
-	"strconv"
-
-	"github.com/gin-gonic/gin"
-)
-
-type Handler struct {
-	uc domain.UseCase
-}
-
-func NewHandler(uc domain.UseCase) *Handler {
-	return &Handler{uc: uc}
-}
-
-func (h *Handler) UploadFile(c *gin.Context) {
-	file, _, err := c.Request.FormFile("data")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	defer file.Close()
-
-	imageData, err := io.ReadAll(file)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	fileDomain := &domain.File{
-		FileName: c.PostForm("file_name"),
-		FileType: c.PostForm("file_type"),
-		FileSize: int64(len(imageData)),
-		Data:     imageData,
-	}
-
-	if err := h.uc.UploadFile(c.Request.Context(), fileDomain); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file", "message": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "file_id": fileDomain.ID, "url": fileDomain.URL})
-}
-
-func (h *Handler) GetFile(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
-		return
-	}
-
-	file, err := h.uc.GetFile(c.Request.Context(), uint(id))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
-		return
-	}
-
-	c.Redirect(http.StatusFound, file.URL)
-}
-END_FILE:internal/adapters/http/files/handler.go
 # path: internal/usecase/notifications/usecase.go | lang: go | tokens: 355 | size: 1421
 # functions: NewService
 BEGIN_FILE:internal/usecase/notifications/usecase.go
@@ -16856,6 +17668,72 @@ type SearchFilters struct {
 	Offset int
 }
 END_FILE:internal/domain/search/entity.go
+# path: internal/adapters/http/files/handler.go | lang: go | tokens: 353 | size: 1413
+# functions: NewHandler
+BEGIN_FILE:internal/adapters/http/files/handler.go
+package files
+
+import (
+	"io"
+	"net/http"
+	domain "server/internal/domain/files"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	uc domain.UseCase
+}
+
+func NewHandler(uc domain.UseCase) *Handler {
+	return &Handler{uc: uc}
+}
+
+func (h *Handler) UploadFile(c *gin.Context) {
+	file, _, err := c.Request.FormFile("data")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer file.Close()
+
+	imageData, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	fileDomain := &domain.File{
+		FileName: c.PostForm("file_name"),
+		FileType: c.PostForm("file_type"),
+		FileSize: int64(len(imageData)),
+	}
+
+	if err := h.uc.UploadFile(c.Request.Context(), fileDomain); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "File uploaded successfully", "file_id": fileDomain.ID, "url": fileDomain.URL})
+}
+
+func (h *Handler) GetFile(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+		return
+	}
+
+	file, err := h.uc.GetFile(c.Request.Context(), uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	c.Redirect(http.StatusFound, file.URL)
+}
+END_FILE:internal/adapters/http/files/handler.go
 # path: internal/usecase/settings/usecase_test.go | lang: go | tokens: 352 | size: 1409
 # functions: TestGetOrgSettings_AccessControl
 BEGIN_FILE:internal/usecase/settings/usecase_test.go
@@ -17019,40 +17897,6 @@ func (h *Handler) Upgrade(c *gin.Context) {
 	go client.ReadPump()
 }
 END_FILE:internal/adapters/http/notifications/ws_handler.go
-# path: internal/domain/tasks/entity.go | lang: go | tokens: 335 | size: 1340
-BEGIN_FILE:internal/domain/tasks/entity.go
-package tasks
-
-import (
-	authDomain "server/internal/domain/auth"
-	orgDomain "server/internal/domain/organisation"
-	projectDomain "server/internal/domain/projects"
-	teamDomain "server/internal/domain/teams"
-	"time"
-)
-
-type Task struct {
-	ID             uint                   `json:"id"`
-	Title          string                 `json:"title"`
-	Description    string                 `json:"description"`
-	DueDate        time.Time              `json:"due_date"`
-	AssignedTo     uint                   `json:"assigned_to"`
-	AssignedUser   *authDomain.User       `json:"assigned_user"`
-	AssignedBy     uint                   `json:"assigned_by"`
-	AssignedByUser *authDomain.User       `json:"assigned_by_user"`
-	Type           string                 `json:"type"`
-	Priority       string                 `json:"priority"`
-	Status         string                 `json:"status"`
-	OrganisationID uint                   `json:"organisation_id"`
-	Organisation   *orgDomain.Entity      `json:"organisation"`
-	IsPersonal     bool                   `json:"is_personal"`
-	TeamID         *uint                  `json:"team_id"`
-	Team           *teamDomain.Team       `json:"team"`
-	ProjectID      *uint                  `json:"project_id"`
-	Project        *projectDomain.Project `json:"project"`
-	CreatedAt      time.Time              `json:"CreatedAt"`
-}
-END_FILE:internal/domain/tasks/entity.go
 # path: .github/workflows/deploy.yml | lang: yaml | tokens: 335 | size: 1341
 BEGIN_FILE:.github/workflows/deploy.yml
 name: Deploy Backend
@@ -17118,37 +17962,40 @@ jobs:
             docker compose up -d backend
           "
 END_FILE:.github/workflows/deploy.yml
-# path: internal/platform/database/models/task_model.go | lang: go | tokens: 330 | size: 1322
-BEGIN_FILE:internal/platform/database/models/task_model.go
-package models
+# path: internal/domain/tasks/entity.go | lang: go | tokens: 335 | size: 1340
+BEGIN_FILE:internal/domain/tasks/entity.go
+package tasks
 
 import (
+	authDomain "server/internal/domain/auth"
+	orgDomain "server/internal/domain/organisation"
+	projectDomain "server/internal/domain/projects"
+	teamDomain "server/internal/domain/teams"
 	"time"
-
-	"gorm.io/gorm"
 )
 
 type Task struct {
-	gorm.Model
-	Title          string        `gorm:"size:255;not null" json:"title"`
-	Description    string        `gorm:"type:text" json:"description"`
-	DueDate        time.Time     `json:"due_date"`
-	AssignedTo     uint          `json:"assigned_to"`
-	AssignedUser   *UserModel    `gorm:"foreignKey:AssignedTo;references:ID" json:"assigned_user"`
-	AssignedBy     uint          `json:"assigned_by"`
-	AssignedByUser *UserModel    `gorm:"foreignKey:AssignedBy;references:ID" json:"assigned_by_user"`
-	Type           string        `gorm:"size:100" json:"type"`
-	Priority       string        `gorm:"size:100" json:"priority"`
-	Status         string        `gorm:"size:50" json:"status"`
-	OrganisationID uint          `gorm:"index" json:"organisation_id"`
-	Organisation   *Organisation `gorm:"foreignKey:OrganisationID" json:"organisation"`
-	IsPersonal     bool          `gorm:"default:false" json:"is_personal"`
-	TeamID         *uint         `gorm:"index" json:"team_id"` // Pointer for nullable
-	Team           *Team         `gorm:"foreignKey:TeamID" json:"team"`
-	ProjectID      *uint         `gorm:"index" json:"project_id"` // Pointer for nullable
-	Project        *Project      `gorm:"foreignKey:ProjectID" json:"project"`
+	ID             uint                   `json:"id"`
+	Title          string                 `json:"title"`
+	Description    string                 `json:"description"`
+	DueDate        time.Time              `json:"due_date"`
+	AssignedTo     uint                   `json:"assigned_to"`
+	AssignedUser   *authDomain.User       `json:"assigned_user"`
+	AssignedBy     uint                   `json:"assigned_by"`
+	AssignedByUser *authDomain.User       `json:"assigned_by_user"`
+	Type           string                 `json:"type"`
+	Priority       string                 `json:"priority"`
+	Status         string                 `json:"status"`
+	OrganisationID uint                   `json:"organisation_id"`
+	Organisation   *orgDomain.Entity      `json:"organisation"`
+	IsPersonal     bool                   `json:"is_personal"`
+	TeamID         *uint                  `json:"team_id"`
+	Team           *teamDomain.Team       `json:"team"`
+	ProjectID      *uint                  `json:"project_id"`
+	Project        *projectDomain.Project `json:"project"`
+	CreatedAt      time.Time              `json:"CreatedAt"`
 }
-END_FILE:internal/platform/database/models/task_model.go
+END_FILE:internal/domain/tasks/entity.go
 # path: internal/domain/settings/repository.go | lang: go | tokens: 330 | size: 1321
 BEGIN_FILE:internal/domain/settings/repository.go
 package settings
@@ -17185,6 +18032,37 @@ type Repository interface {
 	ExportOrgData(orgID uint) (string, error)
 }
 END_FILE:internal/domain/settings/repository.go
+# path: internal/platform/database/models/task_model.go | lang: go | tokens: 330 | size: 1322
+BEGIN_FILE:internal/platform/database/models/task_model.go
+package models
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+type Task struct {
+	gorm.Model
+	Title          string        `gorm:"size:255;not null" json:"title"`
+	Description    string        `gorm:"type:text" json:"description"`
+	DueDate        time.Time     `json:"due_date"`
+	AssignedTo     uint          `json:"assigned_to"`
+	AssignedUser   *UserModel    `gorm:"foreignKey:AssignedTo;references:ID" json:"assigned_user"`
+	AssignedBy     uint          `json:"assigned_by"`
+	AssignedByUser *UserModel    `gorm:"foreignKey:AssignedBy;references:ID" json:"assigned_by_user"`
+	Type           string        `gorm:"size:100" json:"type"`
+	Priority       string        `gorm:"size:100" json:"priority"`
+	Status         string        `gorm:"size:50" json:"status"`
+	OrganisationID uint          `gorm:"index" json:"organisation_id"`
+	Organisation   *Organisation `gorm:"foreignKey:OrganisationID" json:"organisation"`
+	IsPersonal     bool          `gorm:"default:false" json:"is_personal"`
+	TeamID         *uint         `gorm:"index" json:"team_id"` // Pointer for nullable
+	Team           *Team         `gorm:"foreignKey:TeamID" json:"team"`
+	ProjectID      *uint         `gorm:"index" json:"project_id"` // Pointer for nullable
+	Project        *Project      `gorm:"foreignKey:ProjectID" json:"project"`
+}
+END_FILE:internal/platform/database/models/task_model.go
 # path: internal/usecase/task_attachments/usecase.go | lang: go | tokens: 316 | size: 1267
 # functions: NewService
 BEGIN_FILE:internal/usecase/task_attachments/usecase.go
@@ -17320,6 +18198,58 @@ type LeaveHistory struct {
 	Summary LeaveSummary `json:"summary"`
 }
 END_FILE:internal/domain/leave/entity.go
+# path: internal/platform/websocket/manager_subscriber.go | lang: go | tokens: 302 | size: 1211
+# functions: StartManagerSubscriber
+BEGIN_FILE:internal/platform/websocket/manager_subscriber.go
+package websocket
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// StartManagerSubscriber listens to the Redis channel for WebSocket message envelopes to broadcast locally.
+func StartManagerSubscriber(ctx context.Context, redisClient *redis.Client, channel string, hub *Hub) {
+	pubsub := redisClient.Subscribe(ctx, channel)
+
+	// Close the subscription when the context is cancelled.
+	go func() {
+		<-ctx.Done()
+		pubsub.Close()
+	}()
+
+	ch := pubsub.Channel()
+	log.Printf("Started WebSocket Manager subscriber on channel: %s", channel)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Stopping WebSocket Manager subscriber on channel %s due to context cancellation", channel)
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				log.Printf("WebSocket Manager channel %s closed", channel)
+				return
+			}
+
+			var payload managerPubSubMessage
+			if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
+				log.Printf("Error unmarshaling WebSocket Manager pub/sub message: %v", err)
+				continue
+			}
+
+			hub.Broadcast <- &HubMessage{
+				TargetUserID: payload.TargetUserID,
+				TargetRoomID: payload.TargetRoomID,
+				Payload:      payload.Payload,
+			}
+		}
+	}
+}
+END_FILE:internal/platform/websocket/manager_subscriber.go
 # path: cmd/server/main.go | lang: go | tokens: 294 | size: 1178
 # functions: init, main
 BEGIN_FILE:cmd/server/main.go
@@ -18336,6 +19266,27 @@ func (s *service) CreateOffer(ctx context.Context, id uint, callingID, firstName
 }
 func (s *service) EndCall(ctx context.Context, id uint) error { return s.repo.EndCall(ctx, id) }
 END_FILE:internal/usecase/callstate/usecase.go
+# path: internal/domain/invites/repository.go | lang: go | tokens: 183 | size: 735
+BEGIN_FILE:internal/domain/invites/repository.go
+package invites
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+	employeesDomain "server/internal/domain/employees"
+)
+
+type Repository interface {
+	Create(ctx context.Context, invite *EmployeeInvite) error
+	GetByToken(ctx context.Context, token string) (*EmployeeInvite, error)
+	GetByEmail(ctx context.Context, email string, orgID uint) (*EmployeeInvite, error)
+	MarkAccepted(ctx context.Context, id uint) error
+	GetByID(ctx context.Context, id uint) (*EmployeeInvite, error)
+	Update(ctx context.Context, invite *EmployeeInvite) error
+	GetByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
+	AcceptInvite(ctx context.Context, inviteID uint, user *authDomain.User, employee *employeesDomain.Employee) error
+}
+END_FILE:internal/domain/invites/repository.go
 # path: internal/domain/projects/repository.go | lang: go | tokens: 182 | size: 730
 # imports: context
 BEGIN_FILE:internal/domain/projects/repository.go
@@ -18553,31 +19504,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/leave/routes.go
-# path: internal/adapters/http/auth/routes.go | lang: go | tokens: 164 | size: 656
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/auth/routes.go
-package auth
-
-import (
-	"github.com/gin-gonic/gin"
-)
-
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc, rateLimiter gin.HandlerFunc) {
-	r.POST("/api/v1/auth/signup", rateLimiter, h.SignUp)
-	r.POST("/api/v1/auth/signin", rateLimiter, h.SignIn)
-	r.GET("/api/v1/auth/verify-email", h.VerifyEmail)
-	r.POST("/api/v1/auth/refresh", h.RefreshToken)
-
-	authGroup := r.Group("/api/v1/auth")
-	authGroup.Use(validateToken)
-	{
-		authGroup.POST("/complete-signin", h.CompleteSignIn)
-		authGroup.GET("/validate-employee", h.ValidateEmployee)
-		authGroup.POST("/send-verification", h.SendVerificationEmail)
-		authGroup.GET("/me", h.GetMe)
-	}
-}
-END_FILE:internal/adapters/http/auth/routes.go
 # path: internal/adapters/http/tasks/routes.go | lang: go | tokens: 164 | size: 656
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/tasks/routes.go
@@ -18603,42 +19529,31 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/tasks/routes.go
-# path: internal/platform/websocket/notification_broadcaster.go | lang: go | tokens: 160 | size: 643
-# functions: NewBroadcaster
-BEGIN_FILE:internal/platform/websocket/notification_broadcaster.go
-package websocket
+# path: internal/adapters/http/auth/routes.go | lang: go | tokens: 164 | size: 656
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/auth/routes.go
+package auth
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"server/internal/domain/notifications"
+	"github.com/gin-gonic/gin"
 )
 
-type Broadcaster struct {
-	hub *Hub
-}
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc, rateLimiter gin.HandlerFunc) {
+	r.POST("/api/v1/auth/signup", rateLimiter, h.SignUp)
+	r.POST("/api/v1/auth/signin", rateLimiter, h.SignIn)
+	r.GET("/api/v1/auth/verify-email", h.VerifyEmail)
+	r.POST("/api/v1/auth/refresh", h.RefreshToken)
 
-func NewBroadcaster(hub *Hub) notifications.Broadcaster {
-	return &Broadcaster{hub: hub}
-}
-
-func (b *Broadcaster) BroadcastNotification(ctx context.Context, n *notifications.Notification) error {
-	message, err := json.Marshal(n)
-	if err != nil {
-		log.Printf("Error marshaling notification: %v", err)
-		return err
+	authGroup := r.Group("/api/v1/auth")
+	authGroup.Use(validateToken)
+	{
+		authGroup.POST("/complete-signin", h.CompleteSignIn)
+		authGroup.GET("/validate-employee", h.ValidateEmployee)
+		authGroup.POST("/send-verification", h.SendVerificationEmail)
+		authGroup.GET("/me", h.GetMe)
 	}
-
-	// Send to the specific user's websocket connections
-	b.hub.Broadcast <- &HubMessage{
-		TargetUserID: fmt.Sprintf("%d", n.UserID),
-		Payload:      message,
-	}
-	return nil
 }
-END_FILE:internal/platform/websocket/notification_broadcaster.go
+END_FILE:internal/adapters/http/auth/routes.go
 # path: internal/platform/database/models/onboarding_progress_model.go | lang: go | tokens: 160 | size: 642
 # imports: time
 BEGIN_FILE:internal/platform/database/models/onboarding_progress_model.go
@@ -18677,6 +19592,42 @@ type Repository interface {
 	GetByTitle(ctx context.Context, title string) ([]Task, error)
 }
 END_FILE:internal/domain/tasks/repository.go
+# path: internal/platform/websocket/notification_broadcaster.go | lang: go | tokens: 160 | size: 643
+# functions: NewBroadcaster
+BEGIN_FILE:internal/platform/websocket/notification_broadcaster.go
+package websocket
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"server/internal/domain/notifications"
+)
+
+type Broadcaster struct {
+	hub *Hub
+}
+
+func NewBroadcaster(hub *Hub) notifications.Broadcaster {
+	return &Broadcaster{hub: hub}
+}
+
+func (b *Broadcaster) BroadcastNotification(ctx context.Context, n *notifications.Notification) error {
+	message, err := json.Marshal(n)
+	if err != nil {
+		log.Printf("Error marshaling notification: %v", err)
+		return err
+	}
+
+	// Send to the specific user's websocket connections
+	b.hub.Broadcast <- &HubMessage{
+		TargetUserID: fmt.Sprintf("%d", n.UserID),
+		Payload:      message,
+	}
+	return nil
+}
+END_FILE:internal/platform/websocket/notification_broadcaster.go
 # path: internal/adapters/http/calls/handler.go | lang: go | tokens: 155 | size: 621
 # functions: NewHandler
 BEGIN_FILE:internal/adapters/http/calls/handler.go
@@ -18715,25 +19666,6 @@ func (h *Handler) HandleRoom(c *gin.Context) {
 	h.uc.HandleRoom(c.Request.Context(), roomID, ws)
 }
 END_FILE:internal/adapters/http/calls/handler.go
-# path: internal/domain/invites/repository.go | lang: go | tokens: 153 | size: 612
-BEGIN_FILE:internal/domain/invites/repository.go
-package invites
-
-import (
-	"context"
-	authDomain "server/internal/domain/auth"
-	employeesDomain "server/internal/domain/employees"
-)
-
-type Repository interface {
-	Create(ctx context.Context, invite *EmployeeInvite) error
-	GetByToken(ctx context.Context, token string) (*EmployeeInvite, error)
-	GetByEmail(ctx context.Context, email string, orgID uint) (*EmployeeInvite, error)
-	MarkAccepted(ctx context.Context, id uint) error
-	GetByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
-	AcceptInvite(ctx context.Context, inviteID uint, user *authDomain.User, employee *employeesDomain.Employee) error
-}
-END_FILE:internal/domain/invites/repository.go
 # path: internal/usecase/analytics/usecase.go | lang: go | tokens: 152 | size: 609
 # functions: NewService
 BEGIN_FILE:internal/usecase/analytics/usecase.go
@@ -19018,26 +19950,6 @@ type Repository interface {
 	GetByID(ctx context.Context, attachmentID uint) (*TaskAttachment, error)
 }
 END_FILE:internal/domain/task_attachments/repository.go
-# path: internal/platform/database/models/invite_model.go | lang: go | tokens: 120 | size: 481
-BEGIN_FILE:internal/platform/database/models/invite_model.go
-package models
-
-import (
-	"time"
-
-	"gorm.io/gorm"
-)
-
-type Invite struct {
-	gorm.Model
-	OrganisationID uint      `gorm:"index;not null"`
-	Email          string    `gorm:"size:255;not null"`
-	Role           string    `gorm:"size:50;not null"` // e.g. "employee", "manager"
-	Token          string    `gorm:"size:255;not null;unique"`
-	ExpiresAt      time.Time `gorm:"not null"`
-	Status         string    `gorm:"size:50;not null;default:'pending'"` // e.g. pending, accepted, expired
-}
-END_FILE:internal/platform/database/models/invite_model.go
 # path: internal/domain/notifications/entity.go | lang: go | tokens: 120 | size: 483
 # imports: time
 BEGIN_FILE:internal/domain/notifications/entity.go
@@ -19267,22 +20179,6 @@ type NotificationPreference struct {
 	InApp    bool   `gorm:"default:true" json:"in_app"`
 }
 END_FILE:internal/platform/database/models/notification_preference_model.go
-# path: internal/domain/teams/usecase.go | lang: go | tokens: 103 | size: 414
-# imports: context
-BEGIN_FILE:internal/domain/teams/usecase.go
-package teams
-
-import "context"
-
-type UseCase interface {
-	CreateTeam(ctx context.Context, team *Team, members []uint) error
-	GetTeam(ctx context.Context, id uint) (*Team, []TeamMember, error)
-	UpdateTeam(ctx context.Context, team *Team) error
-	DeleteTeam(ctx context.Context, id uint) error
-	GetTeamsByOrganisation(ctx context.Context, orgID uint) ([]Team, error)
-	GetTeams(ctx context.Context) ([]Team, error)
-}
-END_FILE:internal/domain/teams/usecase.go
 # path: internal/platform/database/models/task_attachment_model.go | lang: go | tokens: 103 | size: 415
 BEGIN_FILE:internal/platform/database/models/task_attachment_model.go
 package models
@@ -19302,6 +20198,38 @@ type TaskAttachment struct {
 	UploadedByUser UserModel `gorm:"foreignKey:UploadedBy"`
 }
 END_FILE:internal/platform/database/models/task_attachment_model.go
+# path: internal/domain/teams/usecase.go | lang: go | tokens: 103 | size: 414
+# imports: context
+BEGIN_FILE:internal/domain/teams/usecase.go
+package teams
+
+import "context"
+
+type UseCase interface {
+	CreateTeam(ctx context.Context, team *Team, members []uint) error
+	GetTeam(ctx context.Context, id uint) (*Team, []TeamMember, error)
+	UpdateTeam(ctx context.Context, team *Team) error
+	DeleteTeam(ctx context.Context, id uint) error
+	GetTeamsByOrganisation(ctx context.Context, orgID uint) ([]Team, error)
+	GetTeams(ctx context.Context) ([]Team, error)
+}
+END_FILE:internal/domain/teams/usecase.go
+# path: internal/domain/invites/usecase.go | lang: go | tokens: 103 | size: 415
+BEGIN_FILE:internal/domain/invites/usecase.go
+package invites
+
+import (
+	"context"
+	authDomain "server/internal/domain/auth"
+)
+
+type UseCase interface {
+	InviteEmployee(ctx context.Context, invite *EmployeeInvite) error
+	AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error)
+	GetInvitesByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
+	ResendInvite(ctx context.Context, email string, orgID uint) error
+}
+END_FILE:internal/domain/invites/usecase.go
 # path: internal/domain/chats/usecase.go | lang: go | tokens: 101 | size: 404
 # imports: context
 BEGIN_FILE:internal/domain/chats/usecase.go
@@ -19332,6 +20260,21 @@ type Repository interface {
 	Update(ctx context.Context, org *Entity) error
 }
 END_FILE:internal/domain/organisation/repository.go
+# path: internal/adapters/http/invites/routes.go | lang: go | tokens: 97 | size: 391
+# imports: github.com/gin-gonic/gin
+# functions: RegisterRoutes
+BEGIN_FILE:internal/adapters/http/invites/routes.go
+package invites
+
+import "github.com/gin-gonic/gin"
+
+func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
+	r.POST("/api/v1/employees/invite", validateToken, h.InviteEmployee)
+	r.POST("/api/v1/employees/invite/resend", validateToken, h.ResendInvite)
+	r.POST("/api/v1/invites/accept", h.AcceptInvite) // public
+	r.GET("/api/v1/invites", validateToken, h.GetInvites)
+}
+END_FILE:internal/adapters/http/invites/routes.go
 # path: internal/adapters/http/task_attachments/routes.go | lang: go | tokens: 97 | size: 390
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/task_attachments/routes.go
@@ -19382,6 +20325,20 @@ type TaskComment struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 END_FILE:internal/domain/task_comments/entity.go
+# path: internal/domain/task_attachments/usecase.go | lang: go | tokens: 89 | size: 357
+BEGIN_FILE:internal/domain/task_attachments/usecase.go
+package task_attachments
+
+import (
+	"context"
+)
+
+type UseCase interface {
+	AttachFile(ctx context.Context, taskID uint, fileID uint, uploadedBy uint, fileName string) (*TaskAttachment, error)
+	GetAttachments(ctx context.Context, taskID uint) ([]TaskAttachment, error)
+	RemoveAttachment(ctx context.Context, attachmentID uint, requestingUserID uint) error
+}
+END_FILE:internal/domain/task_attachments/usecase.go
 # path: internal/adapters/http/task_comments/routes.go | lang: go | tokens: 89 | size: 357
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/task_comments/routes.go
@@ -19401,20 +20358,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/task_comments/routes.go
-# path: internal/domain/task_attachments/usecase.go | lang: go | tokens: 89 | size: 357
-BEGIN_FILE:internal/domain/task_attachments/usecase.go
-package task_attachments
-
-import (
-	"context"
-)
-
-type UseCase interface {
-	AttachFile(ctx context.Context, taskID uint, fileID uint, uploadedBy uint, fileName string) (*TaskAttachment, error)
-	GetAttachments(ctx context.Context, taskID uint) ([]TaskAttachment, error)
-	RemoveAttachment(ctx context.Context, attachmentID uint, requestingUserID uint) error
-}
-END_FILE:internal/domain/task_attachments/usecase.go
 # path: internal/adapters/http/callstate/routes.go | lang: go | tokens: 86 | size: 344
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
@@ -19435,21 +20378,6 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/callstate/routes.go
-# path: internal/domain/invites/usecase.go | lang: go | tokens: 86 | size: 347
-BEGIN_FILE:internal/domain/invites/usecase.go
-package invites
-
-import (
-	"context"
-	authDomain "server/internal/domain/auth"
-)
-
-type UseCase interface {
-	InviteEmployee(ctx context.Context, invite *EmployeeInvite) error
-	AcceptInvite(ctx context.Context, token string, password string) (authDomain.TokenPair, error)
-	GetInvitesByOrg(ctx context.Context, orgID uint) ([]EmployeeInvite, error)
-}
-END_FILE:internal/domain/invites/usecase.go
 # path: internal/adapters/http/messages/routes.go | lang: go | tokens: 85 | size: 340
 # imports: github.com/gin-gonic/gin
 # functions: RegisterRoutes
@@ -19469,6 +20397,20 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/messages/routes.go
+# path: internal/domain/organisation/usecase.go | lang: go | tokens: 82 | size: 329
+# imports: context
+BEGIN_FILE:internal/domain/organisation/usecase.go
+package organisation
+
+import "context"
+
+// UseCase defines application-facing ports for organisation operations.
+type UseCase interface {
+	Register(ctx context.Context, org *Entity, ownerUserID uint) (*OwnerEmployeeRow, error)
+	Get(ctx context.Context, id uint) (*Entity, error)
+	Update(ctx context.Context, org *Entity) error
+}
+END_FILE:internal/domain/organisation/usecase.go
 # path: internal/domain/notifications/repository.go | lang: go | tokens: 82 | size: 331
 BEGIN_FILE:internal/domain/notifications/repository.go
 package notifications
@@ -19484,20 +20426,6 @@ type Repository interface {
 	MarkAllRead(ctx context.Context, userID uint) error
 }
 END_FILE:internal/domain/notifications/repository.go
-# path: internal/domain/organisation/usecase.go | lang: go | tokens: 82 | size: 329
-# imports: context
-BEGIN_FILE:internal/domain/organisation/usecase.go
-package organisation
-
-import "context"
-
-// UseCase defines application-facing ports for organisation operations.
-type UseCase interface {
-	Register(ctx context.Context, org *Entity, ownerUserID uint) (*OwnerEmployeeRow, error)
-	Get(ctx context.Context, id uint) (*Entity, error)
-	Update(ctx context.Context, org *Entity) error
-}
-END_FILE:internal/domain/organisation/usecase.go
 # path: internal/domain/onboarding/entity.go | lang: go | tokens: 80 | size: 320
 BEGIN_FILE:internal/domain/onboarding/entity.go
 package onboarding
@@ -19511,49 +20439,6 @@ type OnboardingProgress struct {
 	InviteSent       bool `json:"inviteSent"`
 }
 END_FILE:internal/domain/onboarding/entity.go
-# path: internal/domain/callstate/repository.go | lang: go | tokens: 79 | size: 319
-# imports: context
-BEGIN_FILE:internal/domain/callstate/repository.go
-package callstate
-
-import "context"
-
-type Repository interface {
-	CreateOrUpdate(ctx context.Context, state *State) error
-	GetByID(ctx context.Context, id uint) (*State, error)
-	UpdateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
-	EndCall(ctx context.Context, id uint) error
-}
-END_FILE:internal/domain/callstate/repository.go
-# path: internal/adapters/http/invites/routes.go | lang: go | tokens: 79 | size: 317
-# imports: github.com/gin-gonic/gin
-# functions: RegisterRoutes
-BEGIN_FILE:internal/adapters/http/invites/routes.go
-package invites
-
-import "github.com/gin-gonic/gin"
-
-func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
-	r.POST("/api/v1/employees/invite", validateToken, h.InviteEmployee)
-	r.POST("/api/v1/invites/accept", h.AcceptInvite) // public
-	r.GET("/api/v1/invites", validateToken, h.GetInvites)
-}
-END_FILE:internal/adapters/http/invites/routes.go
-# path: internal/platform/database/models/work_schedule_model.go | lang: go | tokens: 79 | size: 319
-BEGIN_FILE:internal/platform/database/models/work_schedule_model.go
-package models
-
-import (
-	"gorm.io/gorm"
-)
-
-type WorkSchedule struct {
-	gorm.Model
-	OrganisationID uint   `gorm:"index;not null"`
-	Name           string `gorm:"size:100;not null"` // e.g. "Standard Week", "Flexible Shift"
-	ScheduleData   string `gorm:"type:text"`         // JSON or text describing work hours per day
-}
-END_FILE:internal/platform/database/models/work_schedule_model.go
 # path: internal/adapters/http/onboarding/routes.go | lang: go | tokens: 79 | size: 316
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/onboarding/routes.go
@@ -19572,6 +20457,35 @@ func RegisterRoutes(r *gin.Engine, h *Handler, validateToken gin.HandlerFunc) {
 	}
 }
 END_FILE:internal/adapters/http/onboarding/routes.go
+# path: internal/domain/callstate/repository.go | lang: go | tokens: 79 | size: 319
+# imports: context
+BEGIN_FILE:internal/domain/callstate/repository.go
+package callstate
+
+import "context"
+
+type Repository interface {
+	CreateOrUpdate(ctx context.Context, state *State) error
+	GetByID(ctx context.Context, id uint) (*State, error)
+	UpdateOffer(ctx context.Context, id uint, callingID, firstName, lastName, offer string) error
+	EndCall(ctx context.Context, id uint) error
+}
+END_FILE:internal/domain/callstate/repository.go
+# path: internal/platform/database/models/work_schedule_model.go | lang: go | tokens: 79 | size: 319
+BEGIN_FILE:internal/platform/database/models/work_schedule_model.go
+package models
+
+import (
+	"gorm.io/gorm"
+)
+
+type WorkSchedule struct {
+	gorm.Model
+	OrganisationID uint   `gorm:"index;not null"`
+	Name           string `gorm:"size:100;not null"` // e.g. "Standard Week", "Flexible Shift"
+	ScheduleData   string `gorm:"type:text"`         // JSON or text describing work hours per day
+}
+END_FILE:internal/platform/database/models/work_schedule_model.go
 # path: internal/domain/callstate/usecase.go | lang: go | tokens: 78 | size: 312
 # imports: context
 BEGIN_FILE:internal/domain/callstate/usecase.go
@@ -19618,6 +20532,22 @@ type TaskComment struct {
 	User      UserModel `gorm:"foreignKey:UserID"`
 }
 END_FILE:internal/platform/database/models/task_comment_model.go
+# path: internal/platform/database/models/attendance_policy_model.go | lang: go | tokens: 77 | size: 310
+BEGIN_FILE:internal/platform/database/models/attendance_policy_model.go
+package models
+
+import (
+	"gorm.io/gorm"
+)
+
+type AttendancePolicy struct {
+	gorm.Model
+	OrganisationID uint   `gorm:"index;not null"`
+	CheckInTime    string `gorm:"size:10;not null"` // e.g., "09:00"
+	CheckOutTime   string `gorm:"size:10;not null"` // e.g., "18:00"
+	GracePeriodMins int   `gorm:"default:15"`
+}
+END_FILE:internal/platform/database/models/attendance_policy_model.go
 # path: internal/domain/task_comments/usecase.go | lang: go | tokens: 77 | size: 311
 BEGIN_FILE:internal/domain/task_comments/usecase.go
 package task_comments
@@ -19648,22 +20578,6 @@ type TaskActivity struct {
 	Description  string `gorm:"type:text"`
 }
 END_FILE:internal/platform/database/models/task_activity_model.go
-# path: internal/platform/database/models/attendance_policy_model.go | lang: go | tokens: 77 | size: 310
-BEGIN_FILE:internal/platform/database/models/attendance_policy_model.go
-package models
-
-import (
-	"gorm.io/gorm"
-)
-
-type AttendancePolicy struct {
-	gorm.Model
-	OrganisationID uint   `gorm:"index;not null"`
-	CheckInTime    string `gorm:"size:10;not null"` // e.g., "09:00"
-	CheckOutTime   string `gorm:"size:10;not null"` // e.g., "18:00"
-	GracePeriodMins int   `gorm:"default:15"`
-}
-END_FILE:internal/platform/database/models/attendance_policy_model.go
 # path: internal/platform/database/models/file_model.go | lang: go | tokens: 73 | size: 295
 # imports: gorm.io/gorm
 BEGIN_FILE:internal/platform/database/models/file_model.go
@@ -19910,18 +20824,6 @@ type Repository interface {
 	Search(ctx context.Context, filters *SearchFilters) (*SearchResults, error)
 }
 END_FILE:internal/domain/search/repository.go
-# path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
-# imports: context
-BEGIN_FILE:internal/domain/files/usecase.go
-package files
-
-import "context"
-
-type UseCase interface {
-	UploadFile(ctx context.Context, file *File) error
-	GetFile(ctx context.Context, id uint) (*File, error)
-}
-END_FILE:internal/domain/files/usecase.go
 # path: internal/domain/calls/usecase.go | lang: go | tokens: 41 | size: 165
 BEGIN_FILE:internal/domain/calls/usecase.go
 package calls
@@ -19935,6 +20837,18 @@ type UseCase interface {
 	HandleRoom(ctx context.Context, roomID string, ws *websocket.Conn)
 }
 END_FILE:internal/domain/calls/usecase.go
+# path: internal/domain/files/usecase.go | lang: go | tokens: 41 | size: 165
+# imports: context
+BEGIN_FILE:internal/domain/files/usecase.go
+package files
+
+import "context"
+
+type UseCase interface {
+	UploadFile(ctx context.Context, file *File) error
+	GetFile(ctx context.Context, id uint) (*File, error)
+}
+END_FILE:internal/domain/files/usecase.go
 # path: internal/adapters/http/calls/routes.go | lang: go | tokens: 36 | size: 147
 # functions: RegisterRoutes
 BEGIN_FILE:internal/adapters/http/calls/routes.go
@@ -19966,68 +20880,68 @@ package websocket
 // PresenceTracker can be used for future extension of presence logic
 type PresenceTracker struct{}
 END_FILE:internal/platform/websocket/presence_tracker.go
-# path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/http/milestones/handler.go
-package milestone
-END_FILE:internal/adapters/http/milestones/handler.go
-# path: internal/domain/analytics/repository.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/domain/analytics/repository.go
-package analytics
-END_FILE:internal/domain/analytics/repository.go
-# path: internal/usecase/milestones/usecase.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/usecase/milestones/usecase.go
-package milestones
-END_FILE:internal/usecase/milestones/usecase.go
 # path: internal/adapters/http/milestones/routes.go | lang: go | tokens: 4 | size: 18
 BEGIN_FILE:internal/adapters/http/milestones/routes.go
 package milestone
 END_FILE:internal/adapters/http/milestones/routes.go
-# path: internal/adapters/repository/milestones/gorm_repository.go | lang: go | tokens: 4 | size: 18
-BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
-package milestones
-END_FILE:internal/adapters/repository/milestones/gorm_repository.go
 # path: internal/domain/analytics/usecase.go | lang: go | tokens: 4 | size: 18
 BEGIN_FILE:internal/domain/analytics/usecase.go
 package analytics
 END_FILE:internal/domain/analytics/usecase.go
-# path: internal/domain/milestones/entity.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/entity.go
-package entity
-END_FILE:internal/domain/milestones/entity.go
-# path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/domain/audit/repository.go
-package audit
-END_FILE:internal/domain/audit/repository.go
-# path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/domain/audit/entity.go
-package audit
-END_FILE:internal/domain/audit/entity.go
-# path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/audit/usecase.go
-package audit
-END_FILE:internal/domain/audit/usecase.go
+# path: internal/usecase/milestones/usecase.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/usecase/milestones/usecase.go
+package milestones
+END_FILE:internal/usecase/milestones/usecase.go
+# path: internal/adapters/http/milestones/handler.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/http/milestones/handler.go
+package milestone
+END_FILE:internal/adapters/http/milestones/handler.go
+# path: internal/adapters/repository/milestones/gorm_repository.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/adapters/repository/milestones/gorm_repository.go
+package milestones
+END_FILE:internal/adapters/repository/milestones/gorm_repository.go
+# path: internal/domain/analytics/repository.go | lang: go | tokens: 4 | size: 18
+BEGIN_FILE:internal/domain/analytics/repository.go
+package analytics
+END_FILE:internal/domain/analytics/repository.go
 # path: internal/domain/milestones/repository.go | lang: go | tokens: 3 | size: 14
 BEGIN_FILE:internal/domain/milestones/repository.go
 package entity
 END_FILE:internal/domain/milestones/repository.go
-# path: internal/domain/milestones/usecase.go | lang: go | tokens: 3 | size: 14
-BEGIN_FILE:internal/domain/milestones/usecase.go
-package entity
-END_FILE:internal/domain/milestones/usecase.go
-# path: internal/adapters/http/audit/routes.go | lang: go | tokens: 3 | size: 13
-BEGIN_FILE:internal/adapters/http/audit/routes.go
+# path: internal/domain/audit/entity.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/entity.go
 package audit
-END_FILE:internal/adapters/http/audit/routes.go
+END_FILE:internal/domain/audit/entity.go
+# path: internal/domain/audit/repository.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/domain/audit/repository.go
+package audit
+END_FILE:internal/domain/audit/repository.go
 # path: internal/adapters/http/audit/handler.go | lang: go | tokens: 3 | size: 14
 BEGIN_FILE:internal/adapters/http/audit/handler.go
 package audit
 END_FILE:internal/adapters/http/audit/handler.go
+# path: internal/adapters/http/audit/routes.go | lang: go | tokens: 3 | size: 13
+BEGIN_FILE:internal/adapters/http/audit/routes.go
+package audit
+END_FILE:internal/adapters/http/audit/routes.go
+# path: internal/domain/audit/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/audit/usecase.go
+package audit
+END_FILE:internal/domain/audit/usecase.go
 # path: internal/usecase/audit/usecase.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/usecase/audit/usecase.go
 package audit
 END_FILE:internal/usecase/audit/usecase.go
+# path: internal/domain/milestones/entity.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/entity.go
+package entity
+END_FILE:internal/domain/milestones/entity.go
+# path: internal/domain/milestones/usecase.go | lang: go | tokens: 3 | size: 14
+BEGIN_FILE:internal/domain/milestones/usecase.go
+package entity
+END_FILE:internal/domain/milestones/usecase.go
 # path: internal/adapters/repository/audit/gorm_repository.go | lang: go | tokens: 3 | size: 13
 BEGIN_FILE:internal/adapters/repository/audit/gorm_repository.go
 package audit
 END_FILE:internal/adapters/repository/audit/gorm_repository.go
-# included: 244 / 244 | total tokens: 143218
+# included: 247 / 247 | total tokens: 150094

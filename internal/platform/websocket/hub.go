@@ -13,6 +13,7 @@ type PresenceMessage struct {
 type HubMessage struct {
 	TargetUserID string
 	TargetRoomID string
+	SenderClient *Client
 	Payload      []byte
 }
 
@@ -111,8 +112,17 @@ func (h *Hub) Run() {
 				}
 			}
 
-			// Send to collected clients
-			for _, client := range targetClients {
+			// Deduplicate clients and exclude sender
+			uniqueClients := make(map[*Client]bool)
+			for _, c := range targetClients {
+				if message.SenderClient != nil && c == message.SenderClient {
+					continue
+				}
+				uniqueClients[c] = true
+			}
+
+			// Send to collected unique clients
+			for client := range uniqueClients {
 				select {
 				case client.Send <- message.Payload:
 				default:

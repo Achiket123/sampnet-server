@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	authDomain "server/internal/domain/auth"
 	employeesDomain "server/internal/domain/employees"
@@ -114,7 +115,9 @@ func (r *gormRepository) AcceptInvite(ctx context.Context, inviteID uint, u *aut
 			OrganisationID: emp.OrganisationID,
 			Email:          emp.Email,
 		}
-		if err := tx.Create(employeeModel).Error; err != nil {
+		if err := tx.Clauses(clause.OnConflict{
+			UpdateAll: true,
+		}).Create(employeeModel).Error; err != nil {
 			return err
 		}
 

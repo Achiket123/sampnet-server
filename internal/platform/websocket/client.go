@@ -79,19 +79,23 @@ func (c *Client) ReadPump() {
 					RoomID: envelope.RoomID,
 				}
 			} else if envelope.Type == "call_offer" || envelope.Type == "call_answer" || envelope.Type == "ice_candidate" || envelope.Type == "call_ended" || envelope.Type == "call_rejected" || envelope.Type == "call_accepted" {
+				hasTargets := false
 				// Broadcast to all specified target users
 				for _, targetID := range envelope.TargetUserIDs {
 					if targetID != "" {
+						hasTargets = true
 						c.Hub.Broadcast <- &HubMessage{
 							TargetUserID: targetID,
+							SenderClient: c,
 							Payload:      message,
 						}
 					}
 				}
-				// Also broadcast to the room for users already subscribed
-				if envelope.RoomID != "" {
+				// Also broadcast to the room only if no specific targets were addressed
+				if !hasTargets && envelope.RoomID != "" {
 					c.Hub.Broadcast <- &HubMessage{
 						TargetRoomID: envelope.RoomID,
+						SenderClient: c,
 						Payload:      message,
 					}
 				}
@@ -121,12 +125,6 @@ func (c *Client) WritePump() {
 				return
 			}
 			_, _ = w.Write(message)
-
-			// Add queued messages to the current websocket message.
-			n := len(c.Send)
-			for i := 0; i < n; i++ {
-				_, _ = w.Write(<-c.Send)
-			}
 
 			if err := w.Close(); err != nil {
 				return
